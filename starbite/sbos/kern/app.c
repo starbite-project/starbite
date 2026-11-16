@@ -1186,6 +1186,11 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
             return (int64_t)(ra | (el > 0x3ff ? 0x3ff : el) << 14 | (uint64_t)(u.fs_vb_code & 0x3f) << 24 |
                              (uint64_t)(u.fs_open ? 1 : 0) << 30);
         }
+        case SET_SURV_FS_OHM: {
+            struct surv_usb u;
+            surv_usb_status(&u);
+            return u.fs_ohm10;
+        }
         case SET_SURV_FS_SPLIT: {
             struct surv_usb u;
             surv_usb_status(&u);

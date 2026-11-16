@@ -225,6 +225,10 @@ static struct {
     /* MAX (continuous), fs_ov 3: no length, no cooldown, instant re-arm; a summary each second; the boost's target
      * walked up while the load is not at the chip's limit (more volts only help a load above ~3.4 ohm) */
     int fs_vb_code, fs_vb_base, fs_lowv_ticks, fs_open;
+    /* the load's resistance (heater wire / coil trimming): VBYP / I over a window with no limit event (the chip's
+     * switch drops little below its limit), x10; -1 unknown, -2 at the limit (under ~3.4 ohm) */
+    int fs_ohm10;
+    unsigned fs_trips_p0;
     unsigned fs_trips_win;
     uint8_t fs_d2_start;
     uint8_t cnfg11;
@@ -582,6 +586,7 @@ static int usb_start(int fire)
         U.fs_lowv_ticks = 0;
         U.fs_trips_win = 0;
         U.fs_open = 0;
+        U.fs_ohm10 = -1;
         uint8_t d2 = 0;
         U.fs_d2_start = chg_rd(R_DTLS2, &d2) ? d2 : 0;
         fs_pulse_begin();
@@ -688,6 +693,7 @@ static void fs_pulse_begin(void)
     U.fs_rearms_pulse = 0;
     U.fs_vb_sum = U.fs_vb_cnt = U.fs_cellw_sum = 0;
     U.fs_vmid_sum = U.fs_vmid_cnt = 0;
+    U.fs_trips_p0 = U.trips;
     U.fs_stat_lines = 0;
     U.fs_sum = U.fs_cnt = U.fs_peak = 0;
     U.fs_vmin_cur = 99;
@@ -713,6 +719,8 @@ static void fs_pulse_end(void)
     /* fs-max1: the notched lead broke after its second pulse and MAX ran on into nothing: under 50 mA for a whole
      * window with the output on = the load is open (a broken lead, a loose wire) */
     U.fs_open = U.fs_cnt >= 10 && U.fs_avg >= 0 && U.fs_avg < 50;
+    U.fs_ohm10 = U.trips != U.fs_trips_p0 ? -2 :
+                 U.fs_avg >= 100 && U.fs_vb_mean > 3000 ? (int)((int64_t)U.fs_vb_mean * 10 / U.fs_avg) : -1;
     if (U.fs_open)
         sb_log("survival: fs: LOAD OPEN: under 50 mA with the output on (a broken lead or a loose wire)");
     U.fs_sag = U.fs_sag_cur == 99999 ? 0 : U.fs_sag_cur;
@@ -915,7 +923,16 @@ static void fs_max_second(void)
     ub_dec(&u, (uint64_t)(U.usb_c10 > 0 ? U.usb_c10 : 0));
     ub_s(&u, " chg ");
     ub_dec(&u, (uint64_t)(U.chg_c10 > 0 ? U.chg_c10 : 0));
-    ub_s(&u, " dC; re-arms ");
+    ub_s(&u, " dC; load ");
+    if (U.fs_ohm10 >= 0) {
+        ub_dec(&u, (uint64_t)(U.fs_ohm10 / 10));
+        ub_c(&u, '.');
+        ub_dec(&u, (uint64_t)(U.fs_ohm10 % 10));
+        ub_s(&u, " ohm");
+    } else {
+        ub_s(&u, U.fs_ohm10 == -2 ? "< 3.4 ohm (at the limit)" : "? ohm");
+    }
+    ub_s(&u, "; re-arms ");
     ub_dec(&u, U.fs_rearms);
     ub_s(&u, ", limit events ");
     ub_dec(&u, U.trips);
@@ -1353,6 +1370,7 @@ void surv_usb_status(struct surv_usb *s)
     s->fs_rearms = (int32_t)U.fs_rearms;
     s->fs_vb_code = U.fs_vb_code;
     s->fs_open = U.fs_open;
+    s->fs_ohm10 = U.fs_ohm10;
     s->fs_elapsed_ms = U.state == SURV_USB_ON && U.fire == 2 ? (int32_t)(now - U.t_on) : 0;
     s->fs_chip_w10 = U.fs_chip_w10;
     if (U.state == SURV_USB_ON && U.fire == 2) {   /* the time left of this pulse, or of the rest before the next */
