@@ -478,7 +478,12 @@ static void show_fire(void)
     ui_textline("Current limit (the charger chip's own steps; 1.5 A is its top, it trips near 1.6 A)", GREY);
     ui_level(52, "0.9 A|1.2 A|1.5 A", fs_lim);
     ui_textline("Override (test phone S9 #2 only; pulses 1 s at most; risks the charger chip)", ORANGE);
-    ui_level(55, "Off|Re-arm|MAX / heater wire", fs_ov == 3 ? 2 : fs_ov ? 1 : 0);
+    if (setting_get(SET_SURV_FS_OVOK) == 1) {
+        ui_level(55, "Off|Re-arm|MAX / heater wire", fs_ov == 3 ? 2 : fs_ov ? 1 : 0);
+    } else {
+        fs_ov = 0;                          /* the kernel refuses it anyway: the test phone only */
+        ui_level(55, "Off (Re-arm / MAX: test phone only)", 0);
+    }
     ui_textline("The ceiling: about 5.0 V x 1.5 A = 7 W (measured: the boost voltage cannot be raised in this mode).",
                 GREY);
     ui_textline("Keys: Volume Up / Down move, Power short selects (Arm, the choices), hold Power 1 s to fire: it fires "

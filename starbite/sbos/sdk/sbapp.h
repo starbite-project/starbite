@@ -331,7 +331,9 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
                                 VBYPSET code << 24 (6 bits) | the load open (under 50 mA) << 30; override 3 = MAX
                                 (continuous, no cooldown; also the heater-wire mode: steady while held) */,
        SET_SURV_FS_OHM = 63 /* read: the last window's load, 0.1 ohm (VBYP / I with no limit event); -1 unknown,
-                               -2 at the chip's limit (under ~3.4 ohm: lengthen the coil) */ };
+                               -2 at the chip's limit (under ~3.4 ohm: lengthen the coil) */,
+       SET_SURV_FS_OVOK = 64 /* read: 1 the override modes may run on this phone (the card's
+                                /STARBITE/FIRE/OVERRIDE.TXT; the test phone only), 0 not (the kernel refuses them) */ };
 /* SET_SURV_FS_INFO's reason codes (kern/survival.h SURV_FS_WHY_*) */
 enum { FS_WHY_NONE, FS_WHY_DONE, FS_WHY_RELEASED, FS_WHY_ILIM, FS_WHY_VBUS, FS_WHY_FAULT, FS_WHY_HOT, FS_WHY_LOWBAT,
        FS_WHY_STOP, FS_WHY_REFUSED, FS_WHY_COOL, FS_WHY_FINGER };

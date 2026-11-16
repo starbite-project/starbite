@@ -92,6 +92,12 @@ int surv_fs_start_ov(uint32_t pulse_ms, int repeat, int ilim_ma, int ov, int vby
  * dips are let run as the chip designs them; its switch-off, thermal shutdown, battery overcurrent, 45 C, 3.3 V stop */
 int surv_fs_start_x(uint32_t pulse_ms, int repeat, int ilim_ma, int ov, int vbyp, int tol);
 void surv_fs_release(void);                        /* the finger lifted (ui.c): the output off now */
+/* Starbite OS Next's shell: its fire control's finger (1 down, 0 lifted: the output off at once). Classic uses
+ * kern/ui.c's kui_finger_down (touch) and input.c's fire key mode (Power) instead */
+void surv_fs_finger(int down);
+/* 1 when the override modes may run on this phone (the card's /STARBITE/FIRE/OVERRIDE.TXT says "I accept the risk";
+ * only the test phone S9 #2's card has it). surv_fs_start_* refuse ov > 0 otherwise. UIs only hide the choices */
+int surv_fs_override_allowed(void);
 void surv_usb_status(struct surv_usb *s);
 extern const char *const surv_usb_guide[];   /* the on-screen guidance, NULL-terminated */
 

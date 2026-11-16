@@ -128,6 +128,14 @@ headers). What the override does, for pulses of at most 1 s:
 - **Steel wool preset (30e):** 3 s at 1.5 A, no override: the chip's own limit-and-retry (30 ms on, 300 ms off) is
   let run as designed, for a few strands of fine steel wool (a near-short that lights from sparks).
 
+### The override is the test phone's only (30i)
+
+`surv_fs_override_allowed()` (survival.c) allows Re-arm and MAX only when the card's exFAT holds
+`/STARBITE/FIRE/OVERRIDE.TXT` containing "I accept the risk" (read once, cached). Only S9 #2's card has it; S9 #1's
+must never get it. Every start with an override is refused in the kernel otherwise; the Fire starter page then shows
+"Off (Re-arm / MAX: test phone only)". Starbite OS Next uses the same kernel API (survival.h: surv_fs_start_x,
+surv_fs_finger for its fire control, surv_usb_status).
+
 ## 6. Heater wire (30h): the reliable path
 
 Override **MAX / heater wire**: steady output while held, no length, no cooldown, LOAD OPEN under 50 mA. The **Load**

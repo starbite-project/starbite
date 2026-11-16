@@ -319,6 +319,9 @@ static int therm_c10(unsigned ch)
 static void fs_pulse_begin(void);
 static void fs_keep(const char *line);
 static void fs_pulse_end(void);
+/* the trigger: classic's finger or Power (kern/ui.c, input.c), or Starbite OS Next's shell (surv_fs_finger) */
+static int fs_finger_ext;
+static int fs_trigger(void) { return kui_finger_down() || fs_finger_ext; }
 static void fs_tick(uint64_t now);
 static void fs_max_second(void);
 
@@ -474,7 +477,7 @@ static int usb_start(int fire)
         return refuse("never in a self-test image");
     if (heater_running_ui())
         return refuse("Heat is running (both draw hard on the battery)");
-    if (fire == 2 && !kui_finger_down()) {  /* the fire starter fires only under a finger, never from the keys */
+    if (fire == 2 && !fs_trigger()) {       /* the fire starter fires only under a finger (or Power held) */
         int r = refuse("keep a finger on the fire bar, or hold Power, until it fires");
         U.fs_why = SURV_FS_WHY_FINGER;
         return r;
@@ -808,6 +811,37 @@ void surv_fs_release(void)
         fs_stop(SURV_FS_WHY_RELEASED, "released");
 }
 
+void surv_fs_finger(int down)
+{
+    fs_finger_ext = down != 0;
+    if (!down)
+        surv_fs_release();
+}
+
+/* The override (Re-arm, MAX / heater wire) only on a phone whose card holds /STARBITE/FIRE/OVERRIDE.TXT saying
+ * "I accept the risk": the user's test phone S9 #2 has it, S9 #1 never. Decided here, never in a UI. Read once
+ * (an unmounted card is asked again later) */
+static int ov_allowed = -1;
+int surv_fs_override_allowed(void)
+{
+    if (ov_allowed >= 0)
+        return ov_allowed;
+    static const char want[] = "I accept the risk";
+    char b[128];
+    int n = kfile_read("/STARBITE/FIRE/OVERRIDE.TXT", b, sizeof(b));
+    if (n == SBOS_EAGAIN)
+        return 0;
+    ov_allowed = 0;
+    for (int i = 0; n > 0 && i + (int)sizeof(want) - 1 <= n; ++i)
+        if (!memcmp(b + i, want, sizeof(want) - 1)) {
+            ov_allowed = 1;
+            break;
+        }
+    sb_log(ov_allowed ? "survival: fs: the override is allowed on this phone (/STARBITE/FIRE/OVERRIDE.TXT)" :
+                        "survival: fs: no override on this phone (no /STARBITE/FIRE/OVERRIDE.TXT accepting it)");
+    return ov_allowed;
+}
+
 int surv_fs_start(uint32_t pulse_ms, int repeat, int ilim_ma)
 {
     return surv_fs_start_ov(pulse_ms, repeat, ilim_ma, 0, 0);
@@ -822,6 +856,9 @@ int surv_fs_start_x(uint32_t pulse_ms, int repeat, int ilim_ma, int ov, int vbyp
 {
     if (tol && ov)
         return refuse("the steel-wool preset runs without the override");
+    if (ov && !surv_fs_override_allowed())
+        return refuse("the override (Re-arm, MAX) is for the test phone only: this card has no "
+                      "/STARBITE/FIRE/OVERRIDE.TXT accepting the risk");
     if (ov == 3) {                          /* MAX (continuous): no length; one "pulse" logged per second */
         pulse_ms = 0;
         repeat = 0;
@@ -943,7 +980,7 @@ static void fs_max_second(void)
 /* every 20 ms while a hold runs: a pulse's checks, its end, the rest between pulses */
 static void fs_tick(uint64_t now)
 {
-    if (!kui_finger_down()) {               /* ui.c calls surv_fs_release at the lift; this is the backstop */
+    if (!fs_trigger()) {                    /* ui.c calls surv_fs_release at the lift; this is the backstop */
         fs_stop(SURV_FS_WHY_RELEASED, "released");
         return;
     }
