@@ -220,6 +220,14 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
   stream-output draw that can write past its checked extent, a stride field that wraps above 1020 bytes, the
   write set going to the wrong device when one thread has two.
 
+- **11-16 03:52, the review's remaining findings fixed (`sb-nir` d4cb682, sbumd b59839d2 in
+  `build/win/umd-nir-rev2`, now staged for T77):** cull distances on the old translator's path (was undefined
+  behaviour; the two clip-and-cull shaders now compile there, old path 235 compiled / 11 refused), instanced
+  vertex-shader stream output kept inside its checked extent, the stream-output stride carried in bytes (an entry
+  more than 1020 bytes into a vertex is refused), the write set delivered to the submitting device, a locked log
+  table. Zero sanitizer reports on either translator over the corpus.
+- **Running:** tessellation (hull and domain shaders) on the geometry path's machinery, behind `tessemu`.
+
 ## What this means for the two test apps
 - **Geometry Dash:** items 1 and 9. T71 measures the first step.
 - **BeamNG.drive:** item 6 (feature level 11_0) is the gate; before that the game cannot create its device. Items
