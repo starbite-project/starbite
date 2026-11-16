@@ -349,7 +349,14 @@ static void show_fire(void)
     uint32_t col;
     ui_title("Fire starter");
     fmt_init(&f);
-    if (st == 1 && out) {
+    int live = setting_get(SET_SURV_FS_LIVE);
+    int rearms = live & 0x3fff, secs = (live >> 14) & 0x3ff, vbc = (live >> 24) & 0x7f;
+    if (st == 1 && out && fs_ov == 3 && !fs_wool) {
+        fmt_s(&f, "MAX ");
+        fmt_d(&f, secs);
+        fmt_s(&f, " s");
+        ui_big("KEEP HOLDING - LIFT TO STOP", f.b, RED);
+    } else if (st == 1 && out) {
         fmt_s(&f, "FIRING ");
         fmt_d(&f, n + 1);
         fmt_s(&f, "/");
@@ -431,6 +438,14 @@ static void show_fire(void)
             ui_textline(" ", GREY);     /* the layout stays fixed */
     }
     fmt_init(&f);
+    fmt_s(&f, "Re-arms ");
+    fmt_d(&f, rearms);
+    fmt_s(&f, ", time on ");
+    fmt_d(&f, secs);
+    fmt_s(&f, " s, boost code ");
+    fmt_d(&f, vbc);
+    ui_textline(f.b, GREY);
+    fmt_init(&f);
     fmt_s(&f, "Battery ");
     if (c10 == 1023)
         fmt_s(&f, "?");
@@ -447,7 +462,7 @@ static void show_fire(void)
     ui_textline("Current limit (the charger chip's own steps; 1.5 A is its top, it trips near 1.6 A)", GREY);
     ui_level(52, "0.9 A|1.2 A|1.5 A", fs_lim);
     ui_textline("Override (test phone S9 #2 only; pulses 1 s at most; risks the charger chip)", ORANGE);
-    ui_level(55, "Off|Fast re-arm|Re-arm + boost V", fs_ov);
+    ui_level(55, "Off|Re-arm|Re-arm+V|MAX", fs_ov);
     ui_textline("Boost voltage code (VBYPSET; 0 = 5.0 V, the step is being measured)", GREY);
     ui_level(56, "5|10|25|50", fs_vb);
     ui_textline("Keys: Volume Up / Down move, Power short selects (Arm, the choices), hold Power 1 s to fire: it fires "
@@ -623,7 +638,7 @@ void app_event(const struct sbos_event *ev)
         if (ev->id == 55 || ev->id == 56) {
             int v = (int)ev->value;
             if (ev->id == 55)
-                fs_ov = v < 0 ? 0 : v > 2 ? 2 : v;
+                fs_ov = v < 0 ? 0 : v > 3 ? 3 : v;
             else
                 fs_vb = v < 0 ? 0 : v > 3 ? 3 : v;
         } else if (ev->id >= 50 && ev->id <= 52) {

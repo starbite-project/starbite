@@ -684,7 +684,7 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         if (!(v & 0x1000U) || pc > 4U || lc < 1U || lc > 3U)
             return SBOS_EINVAL;
         unsigned ov = (unsigned)((v >> 16) & 3U), vb = (unsigned)((v >> 20) & 0x7fU);
-        if (ov > 2U)
+        if (ov > 3U)
             return SBOS_EINVAL;
         static const uint32_t pms[5] = { 500U, 1000U, 2000U, 3000U, 5000U };
         return surv_fs_start_x(pc <= 1U ? pms[pc] : ov ? SURV_FS_OV_MAX_MS : pms[pc],
@@ -1178,6 +1178,13 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
             return (int64_t)(a | pk << 12 | vm << 24);
         }
         case SET_SURV_FS_KEYS: return kin_fire_keys_id;
+        case SET_SURV_FS_LIVE: {
+            struct surv_usb u;
+            surv_usb_status(&u);
+            uint64_t ra = (uint64_t)(u.fs_rearms < 0 ? 0 : u.fs_rearms > 0x3fff ? 0x3fff : u.fs_rearms);
+            uint64_t el = (uint64_t)(u.fs_elapsed_ms < 0 ? 0 : u.fs_elapsed_ms / 1000);
+            return (int64_t)(ra | (el > 0x3ff ? 0x3ff : el) << 14 | (uint64_t)(u.fs_vb_code & 0x7f) << 24);
+        }
         case SET_SURV_FS_SPLIT: {
             struct surv_usb u;
             surv_usb_status(&u);
