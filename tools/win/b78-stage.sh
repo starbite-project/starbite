@@ -29,9 +29,9 @@ mk() {  # $1 stage name, $2 sbumd.dll, $3 its map, $4 test script
     cp starbite/win/autotest/sb-gputest.cmd "$d/gputest/"
     cp "starbite/win/autotest/$4" "$d/gputest/sb-user.bat"
     if [ "$4" = sb-smoke.bat ]; then
-        cp "$S/sbwddm-t70/gputest/sbcomp.exe" "$S/sbwddm-t72/gputest/sbshow.exe" "$B/winetests/d3d10core_test.exe" "$B/winetests/sbwt.exe" "$d/gputest/"
+        cp "$B/tests/sbcomp.exe" "$B/tests/sbshow.exe" "$B/winetests/d3d10core_test.exe" "$B/winetests/sbwt.exe" "$d/gputest/"
     else
-        cp "$S/sbwddm-t80/gputest/sb-web.html" "$S/sbwddm-t80/gputest/sbshow.exe" "$S/sbwddm-t80/gputest/sbsmooth.exe" "$d/gputest/"
+        cp starbite/win/autotest/sb-web.html "$B/tests/sbshow.exe" "$B/tests/sbsmooth.exe" "$d/gputest/"
     fi
     sums "$d"
     echo "$d: sbwddm $(shasum -a 256 "$d/sbwddm.sys" | cut -c1-8), sbumd $(shasum -a 256 "$d/sbumd.dll" | cut -c1-8), $(wc -l < "$d/SHA256SUMS" | tr -d ' ') files"

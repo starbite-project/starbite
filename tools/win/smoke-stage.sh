@@ -14,7 +14,7 @@ cp "$T/sbkeys.sys" "$T/sbwddm.sys" "$T/sbwdog.sys" "$T/sbwddm.inf" "$S/"
 cp "$T/maps/sbkeys.map" "$T/maps/sbwddm.map" "$T/maps/sbwdog.map" "$S/maps/"
 cp "$dll" "$S/sbumd.dll"; [ -n "$map" ] && cp "$map" "$S/maps/sbumd.map"
 cp starbite/win/autotest/sb-gputest.cmd "$S/gputest/"; cp starbite/win/autotest/sb-smoke.bat "$S/gputest/sb-user.bat"
-cp "$B/stage/sbwddm-t70/gputest/sbcomp.exe" "$B/stage/sbwddm-t72/gputest/sbshow.exe" "$S/gputest/"
+cp "$B/tests/sbcomp.exe" "$B/tests/sbshow.exe" "$S/gputest/"
 cp "$B/winetests/d3d10core_test.exe" "$B/winetests/sbwt.exe" "$S/gputest/"
 h=$(shasum -a 256 "$S/sbumd.dll" | cut -c1-8)
 cat > "$S/INSTALL.md" <<EOT

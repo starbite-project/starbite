@@ -29,7 +29,7 @@ cp "$T/sbkeys.sys" "$T/sbwddm.sys" "$T/sbwdog.sys" "$T/sbwddm.inf" "$T/sbumd.dll
 cp "$T"/maps/*.map "$R/maps/"
 cp starbite/win/autotest/sb-gputest.cmd starbite/win/autotest/sb-gd.bat starbite/win/autotest/sb-click.ps1 "$R/gputest/"
 cp starbite/win/autotest/sb-rows.bat "$R/gputest/sb-user.bat"
-cp "$B/stage/sbwddm-t70/gputest/sbcomp.exe" "$B/stage/sbwddm-t72/gputest/sbshow.exe" "$R/gputest/"
+cp "$B/tests/sbcomp.exe" "$B/tests/sbshow.exe" "$R/gputest/"
 cp "$B/gd-kit-ec-0169/opengl32-gd.dll" "$B/gd-kit-ec-0169/libgallium_wgl-gd.dll" "$R/gputest/"
 cp starbite/win/sbsel/T83.md "$R/INSTALL.md"
 (cd "$R" && find . -type f ! -name SHA256SUMS | sed 's|^\./||' | sort | xargs shasum -a 256 > SHA256SUMS)
