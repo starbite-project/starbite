@@ -8,8 +8,8 @@
 
 The value is UserModeDriverName (REG_MULTI_SZ, the same name four times: D3D9, D3D10, D3D11, D3D12 slots) in the
 display class key of our adapter (Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\NNNN whose MatchingDeviceId
-is acpi\\strb0072). Only that value changes. Any other key that names a Starbite user-mode driver is reported and
-makes "set" refuse (there was none on 2026-11-16).
+is acpi\\strb0072). Only that value changes; "set" refuses unless exactly one such key exists (a walk of the
+user's hive on 2026-11-16 found no other value that names the driver).
 
 Writes go through hivexsh in the lima VM with the main checkout's tools/win/hive-service.py helpers (staging,
 independent read-back, refuses a dirty hive). IN is never modified. Nothing here touches the phone.
@@ -71,7 +71,10 @@ def show(h):
 
 def main(a):
     if len(a) == 2 and a[1] == 'show':
-        hs.check(a[0])
+        try:
+            hs.check(a[0])
+        except SystemExit as e:           # read-only: a dirty hive is still shown, with the warning
+            print(f'({e})')
         show(hs.Hive(a[0]))
         return
     if len(a) != 4 or a[2] != 'set' or a[3] not in NAMES:
@@ -105,7 +108,8 @@ def main(a):
     _, k2 = h2.find(t[0][0])
     rest1 = sorted((n, ty, d) for n, ty, d in h.values(k1) if n != VALUE)
     rest2 = sorted((n, ty, d) for n, ty, d in h2.values(k2) if n != VALUE)
-    if len(t2) != 1 or t2[0][1] != [name] * 4 or rest1 != rest2:
+    raw = [d for n, ty, d in h2.values(k2) if n == VALUE and ty == 7]
+    if len(t2) != 1 or t2[0][1] != [name] * 4 or rest1 != rest2 or raw != [multi(name)[1]]:
         os.remove(out)
         raise SystemExit('own read-back disagrees; output removed')
     show(h2)

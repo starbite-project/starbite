@@ -3191,8 +3191,8 @@ they are (T61's sbumd 6d759c44).
   driver) becomes `sbsel.dll`. Its `OpenAdapter10` / `OpenAdapter10_2` (the two functions both sbumd builds export
   for the runtime) load `System32\sbumd-ng.dll` when WtDat is 63400..63560, otherwise, or on any failure,
   `System32\sbumd.dll`, and forward. The real driver stays loaded for the life of the process. With the file
-  `C:\ProgramData\Starbite\sbsellog` each process appends one line to `umdlog\sbsel.log` (exe, pid, WtDat,
-  driver): that is how a test sees what DWM loaded. Without the file it writes nothing.
+  `C:\ProgramData\Starbite\sbsellog` each process writes one line to its own `umdlog\sbsel-<pid>.log` (exe, pid,
+  WtDat, driver): that is how a test sees what DWM loaded. Without the file it writes nothing.
 - **Files.** `sbumd-ng.dll` = sbumd 0167 (d39b83ab). `sbumd.dll` is not written by the install; the standard rows
   load the same bytes as today, through 52 KB of new code. Kernel drivers are shared (both sets use sbwddm
   d85e0d3a). A test cycle's `sbumd.dll` push still lands on the standard rows only.
@@ -3209,8 +3209,14 @@ they are (T61's sbumd 6d759c44).
   "23H2 · new GPU driver · games; some apps black", `files = ["windows-big3i.uefi"]` (already in the store),
   `wdt = 80`, `wdt_feed = "own"`. It packs (sbstore2 catalog: wdt 80 in the extension table). **The live catalog
   is full: 32 rows of the loader's CAT_MAX 32.** One row has to be dropped for it; that choice is not mine.
-- **Limits.** (1) The store setting "watchdog off" or "one value for every entry" removes the signal: the new row
-  then runs the standard driver. (2) A process that cannot read the State key loads the standard driver. (3) The
+- **Review (a second reader, before the first run):** fixed: `sbsel-install.sh show` died silently when a file was
+  missing; the test log is now one file per process (a shared file created by DWM's account would have been
+  read-only to the user's processes); the lazy load is interlocked; the T83 verdict also fails when a process of
+  the wrong driver is loaded "now" (tasklist), not only by the log lines. Accepted and written down: the real
+  driver now stays loaded when the runtime unloads its user-mode driver (it used to get a fresh image).
+- **Limits.** (1) The store setting "watchdog off" or "one value for every entry" (other than 80 s) removes the
+  signal: the new row then runs the standard driver; "one value" = 80 s would put every watchdog row on the new
+  driver. A boot in which sbwdog does not start keeps the previous boot's value. (2) A process that cannot read the State key loads the standard driver. (3) The
   0167 driver's open problems come with the row (6.104: DWM job timeouts from Edge's start, black classic-app
   windows in screen shots). (4) Nothing here has run on the phone: the selector has never been loaded by Windows.
 - **T83 / T83b** (`build/win/stage/sbwddm-t83`, T61's drivers + sb-rows.bat): one boot of `win11-ng`, one of

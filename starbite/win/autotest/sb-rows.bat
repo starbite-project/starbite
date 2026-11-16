@@ -36,7 +36,7 @@ for %%F in (sbsel.dll sbumd.dll sbumd-ng.dll) do (
     echo ROWS file %%F MISSING >> %L%
   )
 )
-if exist C:\ProgramData\Starbite\sbsellog (echo ROWS selector test log: on >> %L%) else (echo ROWS selector test log: OFF ^(no sbsel.log will exist^) >> %L%)
+if exist C:\ProgramData\Starbite\sbsellog (echo ROWS selector test log: on >> %L%) else (echo ROWS selector test log: OFF ^(no sbsel-*.log will exist^) >> %L%)
 for %%F in (glzc glzcnovsync glzcflip glzcflipd glzcasync ngzcoff) do if exist C:\ProgramData\Starbite\%%F echo ROWS flag file %%F is present >> %L%
 
 call :dwmpid DWM0
@@ -67,21 +67,29 @@ if exist %D%\sb-gd.bat (
 set NG=0
 set ST=0
 set DW=none
-if exist %U%\sbsel.log (
-  echo ROWS sbsel.log: >> %L%
-  type %U%\sbsel.log >> %L%
-  for /f %%c in ('type %U%\sbsel.log ^| find /c "-> sbumd-ng.dll"') do set NG=%%c
-  for /f %%c in ('type %U%\sbsel.log ^| find /c "-> sbumd.dll"') do set ST=%%c
-  for /f "tokens=*" %%l in ('type %U%\sbsel.log ^| find /i "dwm.exe"') do set DW=%%l
+if exist %U%\sbsel-*.log (
+  echo ROWS selector lines ^(one file per process^): >> %L%
+  type %U%\sbsel-*.log >> %L% 2>nul
+  for /f %%c in ('type %U%\sbsel-*.log 2^>nul ^| find /c "-> sbumd-ng.dll"') do set NG=%%c
+  for /f %%c in ('type %U%\sbsel-*.log 2^>nul ^| find /c "-> sbumd.dll"') do set ST=%%c
+  for /f "tokens=*" %%l in ('type %U%\sbsel-*.log 2^>nul ^| find /i "dwm.exe"') do set DW=%%l
 ) else (
-  echo ROWS no sbsel.log >> %L%
+  echo ROWS no sbsel-*.log >> %L%
 )
 echo ROWS selector log: !NG! processes loaded sbumd-ng.dll, !ST! loaded sbumd.dll >> %L%
 echo ROWS DWM: !DW! >> %L%
+rem what is loaded right now in the processes this account can see (catches a process that could not write a line)
+set TNG=0
+set TST=0
+for /f %%c in ('tasklist /m sbumd-ng.dll /fo csv /nh 2^>nul ^| find /c ".exe"') do set TNG=%%c
+for /f %%c in ('tasklist /m sbumd.dll /fo csv /nh 2^>nul ^| find /c ".exe"') do set TST=%%c
+echo ROWS loaded now: sbumd-ng.dll in !TNG! processes, sbumd.dll in !TST! >> %L%
+tasklist /m sbumd.dll /fo csv /nh >> %L% 2>&1
+tasklist /m sbumd-ng.dll /fo csv /nh >> %L% 2>&1
 set V=FAIL
-if "!ROW!"=="NEW-GPU" if !NG! gtr 0 if !ST! equ 0 set V=PASS
-if "!ROW!"=="standard" if !ST! gtr 0 if !NG! equ 0 set V=PASS
-echo ROWS VERDICT !V!: row !ROW!, sbumd-ng.dll in !NG! processes, sbumd.dll in !ST! >> %L%
+if "!ROW!"=="NEW-GPU" if !NG! gtr 0 if !ST! equ 0 if !TST! equ 0 set V=PASS
+if "!ROW!"=="standard" if !ST! gtr 0 if !NG! equ 0 if !TNG! equ 0 set V=PASS
+echo ROWS VERDICT !V!: row !ROW!, selector lines ng !NG! / std !ST!, loaded now ng !TNG! / std !TST! >> %L%
 
 for %%V in (Live_JobsTimedOut Live_GpuResets Live_FaultCount Live_HangCount) do for /f "tokens=3" %%v in ('reg query %K% /v %%V 2^>nul ^| find "REG_DWORD"') do (set /a X=%%v & echo ROWS %%V !X! >> %L%)
 reg query %K% > %U%\sbwddm-state.txt 2>&1

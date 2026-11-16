@@ -9,15 +9,16 @@
 #   tools/win/sbsel-install.sh restore OUT           UserModeDriverName = sbumd.dll again (every row loads sbumd.dll
 #                                                    directly, as before); the two pushed files stay, unused
 #   tools/win/sbsel-install.sh log on|off OUT        the selector's test log (C:\ProgramData\Starbite\sbsellog ->
-#                                                    umdlog\sbsel.log, one line per process): on for a test, off after
+#                                                    umdlog\sbsel-<pid>.log, one line per process): on for a test, off after
 #
 # STAGE = build/win/stage/sbwddm-ng-0169 (sbsel.dll, sbumd-ng.dll, SHA256SUMS; checked before anything is pushed).
 # The row itself (catalog key win11-ng, wdt = 80) is a store change and not done here.
 # Refuses a dirty SYSTEM hive (exit 3; run gpu-cycle.sh --clean-only first). The hive is backed up in OUT/backup/.
 # Every push is read back by sha256 (exit 4). install refuses when System32\sbumd.dll is missing. No boot.
 set -euo pipefail
+self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 cd "$(dirname "$0")/../.."
-usage() { sed -n '2,18p' "$0"; exit 1; }
+usage() { sed -n '2,18p' "$self"; exit 1; }
 mode=${1:-}; [ -n "$mode" ] || usage
 case $mode in
     show|restore) out=${2:-}; [ -n "$out" ] || usage ;;
@@ -44,10 +45,10 @@ push_check() {
 }
 files() {
     for f in sbumd.dll sbsel.dll sbumd-ng.dll; do
-        h=$(adb shell "[ -f $S32/$f ] && sha256sum $S32/$f" | tr -d '\r' | cut -c1-16)
+        h=$(adb shell "[ -f $S32/$f ] && sha256sum $S32/$f || true" | tr -d '\r' | cut -c1-16)
         log "System32\\$f: ${h:-not there}"
     done
-    if adb shell "[ -f $W/ProgramData/Starbite/sbsellog ]"; then log "test log: ON (umdlog\\sbsel.log)"; else log "test log: off"; fi
+    if adb shell "[ -f $W/ProgramData/Starbite/sbsellog ]"; then log "test log: ON (umdlog\\sbsel-<pid>.log)"; else log "test log: off"; fi
 }
 hive_pull() {
     adb pull "$W/$SYS" "$tmp/SYSTEM" >/dev/null
@@ -63,7 +64,7 @@ show)
 log)
     adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null
     if [ "$sw" = on ]; then
-        adb shell "mkdir -p $W/ProgramData/Starbite/umdlog && echo on > $W/ProgramData/Starbite/sbsellog && rm -f $W/ProgramData/Starbite/umdlog/sbsel.log" >/dev/null
+        adb shell "mkdir -p $W/ProgramData/Starbite/umdlog && echo on > $W/ProgramData/Starbite/sbsellog && rm -f $W/ProgramData/Starbite/umdlog/sbsel-*.log" >/dev/null
     else
         adb shell "rm -f $W/ProgramData/Starbite/sbsellog" >/dev/null
     fi
@@ -71,6 +72,7 @@ log)
     exit 0 ;;
 install)
     for f in sbsel.dll sbumd-ng.dll SHA256SUMS; do [ -f "$stage/$f" ] || { log "no $stage/$f"; exit 1; }; done
+    [ "$(grep -cE '  (sbsel|sbumd-ng)\.dll$' "$stage/SHA256SUMS")" = 2 ] || { log "$stage/SHA256SUMS does not list both sbsel.dll and sbumd-ng.dll"; exit 1; }
     (cd "$stage" && grep -E '  (sbsel|sbumd-ng)\.dll$' SHA256SUMS | shasum -a 256 -c - >/dev/null) || { log "$stage does not match its SHA256SUMS"; exit 1; }
     adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null
     adb shell "[ -f $S32/sbumd.dll ]" || { log "System32\\sbumd.dll is missing: the standard driver is not installed; nothing changed"; exit 1; }
@@ -90,6 +92,7 @@ install)
     exit 0 ;;
 restore)
     adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null
+    adb shell "[ -f $S32/sbumd.dll ]" || { log "System32\\sbumd.dll is missing: restoring the name would point at nothing; nothing changed"; exit 1; }
     hive_pull
     cp "$tmp/SYSTEM" "$out/backup/SYSTEM-sbsel-restore-$(date +%Y%m%d-%H%M%S)"
     python3 "$UN" "$tmp/SYSTEM" "$tmp/S1" set sbumd.dll 2>&1 | tee -a "$out/sbsel-install.log"

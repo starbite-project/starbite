@@ -16,9 +16,13 @@
  * goes to the loaded driver's function of the same name. No state besides the loaded module, no C++ (an ARM64X
  * image must have no C++ initializers, 6.106). The real driver stays loaded for the life of the process.
  *
- * Only for tests: when the file C:\ProgramData\Starbite\sbsellog exists, each process appends one line to
- * C:\ProgramData\Starbite\umdlog\sbsel.log: its exe, pid, the WtDat it read and the driver it loaded. That is how
- * a test shows what DWM (another account) loaded. Without the file nothing is written.
+ * Only for tests: when the file C:\ProgramData\Starbite\sbsellog exists, each process writes one line to its own
+ * file C:\ProgramData\Starbite\umdlog\sbsel-<pid>.log (one file per process: a file one account created is
+ * read-only to the others): its exe, pid, the WtDat it read and the driver it loaded. That is how a test shows
+ * what DWM (another account) loaded. Without the switch file nothing is written.
+ *
+ * Known difference to loading the driver directly: the runtime's FreeLibrary of its user-mode driver now unloads
+ * only this DLL; the real driver stays, with its globals, until the process ends.
  *
  * The watchdog counts at 793.457 Hz (sbwdog.c: prescaler 255, DIV128): N s = N * 793.457 counts.
  * 80 s = 63476 or 63477 (0xF7F4/5); 82 s = 65063 (0xFE27). Accepted for the new row: 63400..63560 (79.9..80.1 s).
@@ -30,7 +34,7 @@
 
 typedef HRESULT (APIENTRY *SB_OPEN)(void *);
 
-static HMODULE sb_mod;          /* the driver all calls go to; set once (a race loads the same module twice) */
+static PVOID volatile sb_mod;   /* the driver all calls go to; set once, the first loader wins */
 
 /* 1: this boot came from the new-GPU row. *dat: the value read; *err: 0, or the Win32 error that hid it. */
 static int
@@ -79,7 +83,7 @@ sb_put_u(char *p, char *end, unsigned long v)
 static void
 sb_log(DWORD dat, LONG err, int ng, HMODULE m)
 {
-   char exe[MAX_PATH], mod[MAX_PATH], line[400], *p = line, *end = line + sizeof(line) - 2;
+   char exe[MAX_PATH], mod[MAX_PATH], line[400], name[80], *p = line, *end = line + sizeof(line) - 2, *q;
    const char *e = exe, *d = mod;
    DWORD n, w;
    HANDLE f;
@@ -115,8 +119,12 @@ sb_log(DWORD dat, LONG err, int ng, HMODULE m)
    p = sb_put(p, end, m ? d : "NO DRIVER LOADED");
    *p++ = '\r';
    *p++ = '\n';
-   f = CreateFileW(L"C:\\ProgramData\\Starbite\\umdlog\\sbsel.log", FILE_APPEND_DATA,
-                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+   q = sb_put(name, name + sizeof(name) - 16, "C:\\ProgramData\\Starbite\\umdlog\\sbsel-");
+   q = sb_put_u(q, name + sizeof(name) - 6, GetCurrentProcessId());
+   q = sb_put(q, name + sizeof(name) - 1, ".log");
+   *q = 0;
+   f = CreateFileA(name, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_ALWAYS,
+                   FILE_ATTRIBUTE_NORMAL, NULL);
    if (f == INVALID_HANDLE_VALUE)
       return;
    WriteFile(f, line, (DWORD)(p - line), &w, NULL);
@@ -141,7 +149,7 @@ sb_load(const wchar_t *name)
 static HMODULE
 sb_driver(void)
 {
-   HMODULE m = sb_mod;
+   HMODULE m = (HMODULE)sb_mod, won;
    DWORD dat;
    LONG err;
    int ng;
@@ -152,8 +160,16 @@ sb_driver(void)
       m = sb_load(L"sbumd-ng.dll");
    if (!m)
       m = sb_load(L"sbumd.dll");
-   if (m)
-      sb_mod = m;
+   if (!m) {
+      sb_log(dat, err, ng, NULL);
+      return NULL;
+   }
+   /* two threads at once: both use the module the first one stored, the other reference is dropped */
+   won = (HMODULE)InterlockedCompareExchangePointer(&sb_mod, m, NULL);
+   if (won) {
+      FreeLibrary(m);
+      return won;
+   }
    sb_log(dat, err, ng, m);
    return m;
 }
@@ -194,8 +210,8 @@ SbSelWhich(void)
 BOOL WINAPI
 DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 {
+   (void)inst;
+   (void)reason;
    (void)reserved;
-   if (reason == DLL_PROCESS_ATTACH)
-      DisableThreadLibraryCalls(inst);
    return TRUE;
 }

@@ -36,6 +36,11 @@ and drop the `win11-ng` row at the next store update. The two files may stay in 
 - Known problems of this driver (T78, open): from Microsoft Edge's start the desktop stalled (DWM GPU job timeouts),
   and Calculator, Notepad, Explorer came out black in screen shots. Hence the row's text
   "new GPU driver · games; some apps black". The standard rows do not have this driver and are not affected.
-- The row signal depends on the store's watchdog setting being "per entry" (the default). With the setting "off"
-  or "one value for every entry" the new row loads the standard driver: safe, but then it is no different.
+- The row signal depends on the store's watchdog setting being "per entry" (the default). With "off", or "one
+  value for every entry" at anything but 80 s, the new row loads the standard driver: safe, but no different. With
+  "one value for every entry" = 80 s EVERY Windows row with a watchdog would load the new driver: do not set that.
+- If sbwdog.sys ever fails to start, its State key keeps the previous boot's value, and that boot follows the
+  previous boot's row. sbwdog is boot-start and has started in every pulled boot.
+- The runtime's unload of its user-mode driver now unloads only the selector; the real driver stays loaded in the
+  process (it used to be unloaded and loaded fresh). T83b and every later test on the standard rows exercise that.
 - A process that cannot read HKLM\SYSTEM\...\sbwdog\State (a tight sandbox) loads the standard driver on any row.
