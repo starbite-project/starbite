@@ -53,7 +53,9 @@ s6p)
 	ica=$(n 'CRASH iconservicesagen')
 	info="$info | extensions issued lines $iss, SBDIAG done $done_, apps running $running of 7 (Books $books), coreaudiod up $capid / crashes $ca, iconservicesagent crashes $ica"
 	[ "$iss" -ge 1 ] || soft "no sandbox extension was issued (is sweetsbext=1 in the payload?)"
-	[ "$done_" -ge 1 ] || soft "the diagnostics did not finish"
+	# (S6p 11-16: "log show" runs past the reboot timer, so SBDIAG done is reported, not required)
+	apps7=$(n 'SBDIAG app [A-Za-z]+: (running|NOT running)')
+	[ "$apps7" -ge 7 ] || soft "the diagnostics did not reach the app checks"
 	[ "$nc" -le 3 ] || soft "NotificationCenter still crash-loops ($nc)"
 	[ "$ica" -le 2 ] || soft "iconservicesagent crash-loops with the Metal device ($ica)"
 	;;
