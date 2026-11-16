@@ -3305,7 +3305,15 @@ static uint32_t *ft_pv[FT_CAPS];
 static uint32_t ft_lines[FT_CAPS], ft_gain[FT_CAPS], ft_luma[FT_CAPS];
 static int ft_cap, ft_save, ft_saved, ft_save_fail;
 static uint32_t ft_turns0, ft_excluded;
-static uint64_t ft_cam_t0;
+static uint64_t ft_cam_t0, ft_count_t;
+static int ft_count;
+/* the test's own screen (shell_face.inc fx_test): face=test-count:N, test-run, test-done */
+static void ft_screen(const char *key, int n)
+{
+    sh_set("face", key, (float)n);
+    need_full = 1;
+    next_kdraw();
+}
 uint32_t face_selftest_excluded(void) { return ft_excluded; }
 static void ft_free(void)
 {
@@ -3338,6 +3346,8 @@ int face_selftest_step(void)
     case 0:
         if (!face_up) return 0;
         ftest_t = sb_ms();
+        ft_screen("test-count", 0);                  /* "Look at the phone": over the lock (touches do nothing) */
+        sb_log("selftest: next-face: the test's screen is up (Look at the Phone); touches are ignored in this image");
         {
             const uint8_t *p;
             size_t n;
@@ -3353,8 +3363,18 @@ int face_selftest_step(void)
         return 0;
     case 2:
         if (fsvc_busy()) return 0;
+        ft_count = 3;                                /* 3, 2, 1 on the screen, a second each */
+        ft_count_t = sb_ms();
+        ft_screen("test-count", 3);
+        ftest_phase = 6;
+        return 0;
+    case 6:
+        if (sb_ms() - ft_count_t < 1000) return 0;
+        ft_count_t = sb_ms();
+        if (--ft_count > 0) { ft_screen("test-count", ft_count); return 0; }
         sb_log("selftest: next-face: LOOK AT THE PHONE now (about 30 cm), for 10 s: the camera runs 9 s");
         if (!fsvc_camera_test(9000)) { sb_log("selftest: next-face: FAILED: the camera test did not start (the camera?)"); return -1; }
+        ft_screen("test-run", 0);
         ft_cam_t0 = sb_ms();
         ft_cap = 0;
         ftest_phase = 3;
@@ -3396,6 +3416,7 @@ int face_selftest_step(void)
         if (fsvc_busy()) return 0;
         if (!fsvc_result_first_frame_ms()) { sb_log("selftest: next-face: FAILED: no camera frame"); ft_free(); return -1; }
         /* the saves: their turns are excluded from the test's count */
+        ft_screen("test-done", 0);
         kphotos_entry("sbos-facedbg");
         ft_turns0 = K.turns_100;
         ft_save = ft_saved = ft_save_fail = 0;

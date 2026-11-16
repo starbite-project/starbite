@@ -19,6 +19,7 @@ static struct {
     /* set-up */
     int on, built, poses, done, fail, ehint;
     int wait;                       /* set-up asked for while the pack loads: its mode + 1 */
+    int test, count;                /* the face test image's screen: 1 the countdown (count), 2 looking, 3 done */
     int was_locked;                 /* the lock state last told to the platform (sh_face_lock) */
     unsigned seq;
     float a, at;
@@ -132,6 +133,17 @@ static void fx_draw_text(void)
     relayer(&fxtext);
     dc d = mk(&fxtext, "fx-text", 20, 70, 350, 120, 0, 0);
     if (!d.b->px) return;
+    if (FX.test) {
+        const char *t = FX.test == 1 ? "Look at the Phone" : FX.test == 2 ? "Keep Looking" : "Thank You";
+        const char *m = FX.test == 1 ? "Hold it upright, about 30 cm away."
+                      : FX.test == 2 ? "Look at the circle. Don't touch the screen."
+                      : "Saving. The phone restarts by itself.";
+        d_text_box(&d, TK_IT600, 30, 195, 112, 340, 1, t, 0, 0, INK, 0);
+        d_text_box(&d, TK_IT400, 17, 195, 150, 330, 1, m, 0, 0, W(.85f), 0);
+        trim(&fxtext);
+        tk_layer_prepare(&fxtext);
+        return;
+    }
     d_text_box(&d, TK_IT600, 28, 195, 112, 340, 1, FX.done ? "Face Unlock Is Set Up" : "Face Unlock", 0, 0, INK, 0);
     const char *m = FX.fail ? FX.msg
                   : FX.done ? (sh_face_mode() == SH_FACE_SECURITY ? "Security: look at the phone and blink or turn your head slightly." : "Speed: look at the phone to unlock.")
@@ -166,6 +178,10 @@ static void fx_draw_ring(void)
     for (int i = 0; i < 4; i++)
         d_arc(&d, cx, cy, rr, 3, A[i].a0 + .08f, PI / 2 - .16f, FX.done || (FX.poses & A[i].bit) ? lit : dim);
     if (FX.poses & 1 || FX.done) d_arc(&d, cx, cy, (FX_R + 2) / 2, 1, 0, 2 * PI, FX.done ? lit : W(.5f));
+    if (FX.test == 1 && FX.count > 0) {                 /* the countdown's number (halved space: 60 pt shown as 120) */
+        char n[2] = { (char)('0' + (FX.count > 9 ? 9 : FX.count)), 0 };
+        d_text_box(&d, TK_IT600, 60, cx, cy + 21, 100, 1, n, 0, 0, INK, 0);
+    }
     tk_layer_prepare(&fxring);
 }
 static void fx_draw_bot(void)
@@ -173,6 +189,7 @@ static void fx_draw_bot(void)
     relayer(&fxbot);
     dc d = mk(&fxbot, "fx-bot", 20, FX_BOT - 30, 350, 44, 0, 0);
     if (!d.b->px) return;
+    if (FX.test) { trim(&fxbot); tk_layer_prepare(&fxbot); return; }   /* the face test: no button */
     const char *t = FX.done ? "Done" : FX.fail ? "Try Again" : "Cancel";
     float w = capsule_w(t, 1);
     d_capsule_btn(&d, 195 - w / 2, FX_BOT - 30, t, FX.done || FX.fail ? ACCENT() : W(1), 1);
@@ -291,6 +308,7 @@ static void fx_setup(void)
 static int fx_touch(int phase, float x, float y)
 {
     if (!FX.on) return 0;
+    if (FX.test) return 1;                          /* the face test's screen: every touch is its own (ignored) */
     if (phase != 2) return 1;
     if (y >= FX_BOT - 34 && y < FX_BOT + 20) {
         if (FX.fail && x < 110) { fx_close(); return 1; }
@@ -302,6 +320,7 @@ static int fx_touch(int phase, float x, float y)
 }
 static int fx_setup_poll(void)
 {
+    if (FX.on && FX.test) { int ch = fx_pull(); if (ch) fx_kids(); return ch; }   /* the face test: the preview only */
     if (!FX.on || FX.done || FX.fail) return 0;
     if (FX.wait) {                                   /* the pack arrived? then the camera */
         int r = sh_face_enrol(FX.wait - 1);
@@ -361,7 +380,7 @@ static int fx_tick(float dt)
     return mv;
 }
 static int fx_moving(void) { return FX.a != FX.at; }
-static float fx_next_update(void) { return FX.scan ? 33 : FX.on && !FX.done && !FX.fail ? (FX.wait ? 100 : 40) : -1; }
+static float fx_next_update(void) { return FX.scan ? 33 : FX.on && FX.test ? 50 : FX.on && !FX.done && !FX.fail ? (FX.wait ? 100 : 40) : -1; }
 static int fx_refresh(void) { fx_lockstate(); return fx_poll() | fx_setup_poll(); }
 static void fx_reset(void)
 {
@@ -461,8 +480,38 @@ static int fx_page_press(float x, float y, tk_rect *r, tk_rect *gr, float *rad, 
 /* ---- the host's stills: face=ok (matched on the lock), face=scan (looking), face=setup:POSES (the set-up screen with
  * those pose bits, no camera), face=done (set up) ------------------------------------------------------------- */
 static void apply_tweens(void);
+/* the face test image (kern_next.c face_selftest_step): face=test-count:N, face=test-run, face=test-done, face=test-off */
+static int fx_test(const char *key, float v)
+{
+    int st = !tk_strcmp(key, "test-count") ? 1 : !tk_strcmp(key, "test-run") ? 2 : !tk_strcmp(key, "test-done") ? 3 : 0;
+    if (!st && tk_strcmp(key, "test-off")) return 0;
+    if (!st) { FX.test = 0; FX.on = 0; FX.at = 0; relink(); return 1; }
+    int fresh = !FX.on || !FX.test;
+    FX.test = st;
+    FX.count = (int)v;
+    FX.poses = 0;
+    FX.done = st == 3;
+    FX.fail = FX.wait = FX.ehint = 0;
+    if (fresh) {
+        FX.on = 1;
+        FX.seq = 0;
+        if (FX.built) fx_free();
+        fx_build();
+        FX.a = FX.at = 1;
+        fxl.alpha = 1;
+        fxl.hidden = 0;
+        relink();
+    } else {
+        fx_draw_text();
+        fx_draw_ring();
+        fx_draw_bot();
+        fx_kids();
+    }
+    return 1;
+}
 static int fx_set(const char *key, float v)
 {
+    if (fx_test(key, v)) return 1;
     if (!tk_strcmp(key, "ok")) { FX.ok = 1; FX.scan = 0; fx_glyph(); glyph_a = glyph_t; apply_tweens(); return 1; }
     if (!tk_strcmp(key, "scan")) { FX.scan = 1; fx_glyph(); glyph_a = glyph_t; apply_tweens(); return 1; }
     if (!tk_strcmp(key, "setup") || !tk_strcmp(key, "done")) {

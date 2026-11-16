@@ -230,6 +230,10 @@ void selftest_input(void)
     }
     if (!active)
         return;
+#ifdef SBOS_SELFTEST_NEXT_FACE
+    return;                                 /* the face test is attended: the user's touches must not stop it (11-16:
+                                             * the first run was stopped by the lock screen's unlock) */
+#endif
     active = 0;
     kt_cancel(KT_SELFTEST, 0);
     if (phase == 13)

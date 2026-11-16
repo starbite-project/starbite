@@ -613,7 +613,7 @@ int sh_face_enrol_poll(int *poses, int *hint)
 }
 const uint32_t *sh_face_frame(int *w, int *h, unsigned *seq)
 {
-    if (F.job != J_ENROL || !F.cam_on) return 0;
+    if ((F.job != J_ENROL && F.job != J_CAMTEST) || !F.cam_on) return 0;   /* (the face test's screen too) */
     unsigned s = 0;
     const uint32_t *px = P.cam_frame(&s);
     if (!px) return 0;
