@@ -1,0 +1,123 @@
+0463: "STARLTE EXEC": which programs are started, and how often.
+
+S6f 2026-11-16 (macOS idle, untouched, 7 min): the pid counter rises by 45-75 a minute and launchd uses 14 % of a
+core (profile: workqueue wake-ups, logging, madvise, posix_spawn), but the log names only programs that crash.
+kern_exec.c set_proc_name() counts every exec by name (starlte_exec_note); bsd/dev/starlte_smp.c prints with
+STARLTE TOP every 10 s: "STARLTE EXEC (10 s): 9 started: voicebankingd x3 ...", nothing for a window without starts.
+Kernel seq2h = seq2g + 0463 (kern_exec.o is now linked from the scratch objects).
+
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -972,6 +972,12 @@
+ 	 * this being overridden.
+ 	 */
+ 	set_crash_behavior_from_bootarg(p);
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	{
++		extern void starlte_exec_note(const char *name);        /* 0463, bsd/dev/starlte_smp.c */
++		starlte_exec_note(p->p_comm);
++	}
++#endif
+ }
+ 
+ #if __has_feature(ptrauth_calls)
+--- a/bsd/dev/starlte_smp.c
++++ b/bsd/dev/starlte_smp.c
+@@ -100,6 +100,7 @@
+ extern uint32_t c_segment_pages_compressed, c_segment_pages_compressed_nearing_limit;
+ extern uint64_t get_task_phys_footprint(task_t);
+ static void st_top_mem(void);
++static void st_top_exec(uint64_t window_ns);    /* 0463 */
+ 
+ /*
+  * Which processes use the CPU (the S7 and S9 ports found a Bluetooth audio plug-in polling a
+@@ -186,6 +187,7 @@
+ 			extern void sweet_topk_report(uint64_t window_ns);    /* 0447, osfmk/kern/exception.c */
+ 			sweet_topk_report(window_ns);
+ 			st_top_a64e(window_ns);
++			st_top_exec(window_ns);         /* 0463 */
+ 			st_top_mem();
+ 		}
+ 		bcopy(st_top_now, st_top_last, sizeof(st_top_now[0]) * st_top_n);
+@@ -196,6 +198,81 @@
+ }
+ 
+ /*
++ * 0463: which programs are started, and how often. S6f 2026-11-16 (macOS idle, nobody touching it): the pid
++ * counter rises by 45-75 a minute and launchd uses 14 % of a core handling it, but the log names only the few
++ * that crash. Every exec is counted by name (kern_exec.c set_proc_name); with STARLTE TOP every 10 s:
++ * "STARLTE EXEC (10 s): 9 started: voicebankingd x3 NotificationCenter x1 ...". Nothing is printed for a
++ * window without starts.
++ */
++#define ST_EXEC_NAMES 40
++static struct { char name[17]; uint32_t n; } st_exec[ST_EXEC_NAMES];
++static uint32_t st_exec_other;
++static LCK_GRP_DECLARE(st_exec_grp, "starlte-exec");
++static LCK_MTX_DECLARE(st_exec_lock, &st_exec_grp);
++
++void starlte_exec_note(const char *name);
++void
++starlte_exec_note(const char *name)
++{
++	lck_mtx_lock(&st_exec_lock);
++	int free = -1, i;
++	for (i = 0; i < ST_EXEC_NAMES; i++) {
++		if (st_exec[i].n == 0) {
++			free = free < 0 ? i : free;
++		} else if (strncmp(st_exec[i].name, name, sizeof(st_exec[i].name) - 1) == 0) {
++			st_exec[i].n++;
++			break;
++		}
++	}
++	if (i == ST_EXEC_NAMES) {
++		if (free >= 0) {
++			strlcpy(st_exec[free].name, name, sizeof(st_exec[free].name));
++			st_exec[free].n = 1;
++		} else {
++			st_exec_other++;
++		}
++	}
++	lck_mtx_unlock(&st_exec_lock);
++}
++
++static void
++st_top_exec(uint64_t window_ns)
++{
++	char line[512];
++	uint32_t total = 0;
++	lck_mtx_lock(&st_exec_lock);
++	for (int i = 0; i < ST_EXEC_NAMES; i++) {
++		total += st_exec[i].n;
++	}
++	total += st_exec_other;
++	if (total == 0) {
++		lck_mtx_unlock(&st_exec_lock);
++		return;
++	}
++	int n = snprintf(line, sizeof(line), "STARLTE EXEC (%llu s): %u started:", window_ns / NSEC_PER_SEC, total);
++	for (int k = 0; k < ST_EXEC_NAMES && n < (int)sizeof(line) - 28; k++) {
++		int best = -1;
++		for (int i = 0; i < ST_EXEC_NAMES; i++) {
++			if (st_exec[i].n != 0 && (best < 0 || st_exec[i].n > st_exec[best].n)) {
++				best = i;
++			}
++		}
++		if (best < 0) {
++			break;
++		}
++		n += snprintf(line + n, sizeof(line) - (size_t)n, " %s x%u", st_exec[best].name, st_exec[best].n);
++		st_exec[best].n = 0;
++	}
++	if (st_exec_other != 0) {
++		snprintf(line + n, sizeof(line) - (size_t)n, " others x%u", st_exec_other);
++	}
++	bzero(st_exec, sizeof(st_exec));
++	st_exec_other = 0;
++	lck_mtx_unlock(&st_exec_lock);
++	printf("%s\n", line);
++}
++
++/*
+  * Where the RAM goes (the iOS 26 port runs out of it with two Metal clients): every 30 s, the
+  * page queues and the compressor, then the six largest physical footprints:
+  * "STARLTE MEM: free 40 wired 600 active 300 inactive 200 compressed 450 (near 700) MiB; top: ...".
