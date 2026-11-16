@@ -3606,6 +3606,27 @@ set for 64-bit; measured.)
   would be a simpler way than one ARM64X file for both. Not used.
 - The chain cleared the value again after the test, as planned.
 
+### 6.121 Chain results, part 8: T86, the system's OpenGL loads our driver in native and x64 programs
+
+(2026-11-16 19:46; `build/win/results-t86`: `sbglicd.dll` + `sbgl-arm64.dll` + `sbgl-x64.dll` registered with an allow list of the
+three test programs, T61's D3D driver set; measured. `GLSYS VERDICT: PASS`.)
+
+- **All three kinds of process get the hardware driver through the SYSTEM opengl32.dll:** a native ARM64 program,
+  an ARM64EC program and a plain x64 program each report `renderer "Mali-G72 MC18 (Panfrost)", GL 3.1`, 864 pixel
+  formats (828 from the ICD), **30 of 30 shader frames read back right**, glGetError 0. The front's own lines show
+  the ARM64 half loading `sbgl-arm64.dll` and the x64 half `sbgl-x64.dll`.
+- **Speed in a 640x480 window** (the kit's default GDI present): 41.4 fps native, 46.8 ARM64EC, 47.4 x64, 65-72 of
+  300 frames over 50 ms. The first `DescribePixelFormat` took 2.5-2.8 s in the first two processes (driver load and
+  screen creation), 0.15 s in the third.
+- **Both ways back work:** switched off by `glsys\off-<exe>` the program gets Microsoft's "GDI Generic" GL 1.1 with
+  our DLL not loaded; a process that cannot reach the Mali gets the same with the DLL loaded and no ICD pixel
+  formats; neither crashes. So opengl32 does fall back when the ICD refuses, REG_MULTI_SZ is accepted for
+  `OpenGLDriverName`, and a bare file name resolves to System32 (three things that were unverified in 6.111).
+- DWM is the same process at the end.
+- The chain cleared the registration after the test. Still open before it is installed for every program: the
+  present path (GDI, ~45 fps here; the zero-copy path is behind the game kit's flags), GL 3.1 only, no 32-bit
+  build, and a first real program other than our test.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
