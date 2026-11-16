@@ -209,6 +209,17 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
   NIR validation in the form tried (to be written as libpan kernels). Recommended first version: worst-case
   allocation from the hull shader's maximum factor, no readback (`docs/WIN11-GPU-NIR-FRONTEND.md`, Phase 8).
 
+- **11-16 03:41, independent review of the branch before its first run (`sb-nir` 1dff796, sbumd 6cc75683 in
+  `build/win/umd-nir-rev1`, now the DLL staged for T77):** seven defects fixed, found by reading, a sanitizer build
+  and ~21,700 mutated shaders per translator: a double free at every compute shader destroy; a use-after-free read
+  in the geometry-shader set-up; a stack overwrite when a shader has more than 80 output variables; an unchecked
+  index range (crash on malformed bytecode); the token parser trusting opcode numbers and lengths in the release
+  build; a leak per refused geometry shader; a static array shared between devices. The new translator then refused
+  or translated every mutant without a sanitizer report; the old translator crashes on malformed bytecode throughout
+  (upstream code). Being fixed next: undefined behaviour for cull distances on the old path, an instanced
+  stream-output draw that can write past its checked extent, a stride field that wraps above 1020 bytes, the
+  write set going to the wrong device when one thread has two.
+
 ## What this means for the two test apps
 - **Geometry Dash:** items 1 and 9. T71 measures the first step.
 - **BeamNG.drive:** item 6 (feature level 11_0) is the gate; before that the game cannot create its device. Items
