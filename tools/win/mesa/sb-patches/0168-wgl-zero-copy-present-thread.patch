@@ -1,0 +1,309 @@
+From da5173fddcaf0f2615b61cb0559ce26d7b2e6bcf Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 02:23:38 +0200
+Subject: [PATCH] 0168: the zero-copy present on a thread of its own (flag file
+ glzcasync): the game thread hands a frame over and goes on; the GL-frame
+ wait, copy, Present and copy wait run on the present thread;
+ malikm_kmt_frame_mark/reached wait without the device lock
+
+---
+ include/win32-compat/malikm_drm.c     |  45 +++++++
+ src/gallium/targets/wgl/wgl_sb_zc.cpp | 187 ++++++++++++++++++++++++++
+ 2 files changed, 232 insertions(+)
+
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index 40f9a00..dc74c59 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -2624,6 +2624,51 @@ malikm_kmt_frame_wait(unsigned ms)
+    return ret;
+ }
+ 
++/* sb-patches/0168 (the zero-copy present thread, docs/WIN11-GPU.md 6.103): malikm_kmt_frame_wait holds the device
++ * lock for the whole wait, so the game thread could not submit meanwhile. Here the caller's event is queued behind
++ * everything this context has submitted so far (the frame that was just flushed) and the lock is dropped at once;
++ * the caller waits on the event wherever it likes and then says so with malikm_kmt_frame_reached. 0 when queued. */
++int
++malikm_kmt_frame_mark(void *event_handle, uint64_t *seq)
++{
++   struct sbdev *d = sb_kdev;
++   int ret = -1;
++   if (!d || d->on || !event_handle)
++      return -1;
++   AcquireSRWLockExclusive(&d->lock);
++   if (d->pend)
++      (void)sb_flush_pend(d);           /* T30: a held-back chain goes first */
++   if (kmt.SignalSynchronizationObject2) {
++      D3DKMT_SIGNALSYNCHRONIZATIONOBJECT2 sig = {0};
++      sig.hContext = d->kcontext;
++      sig.Flags.EnqueueCpuEvent = 1;
++      sig.CpuEventHandle = (HANDLE)event_handle;
++      ResetEvent((HANDLE)event_handle);
++      if (kmt.SignalSynchronizationObject2(&sig) >= 0) {
++         if (seq)
++            *seq = d->seq;
++         ret = 0;
++      }
++   }
++   ReleaseSRWLockExclusive(&d->lock);
++   return ret;
++}
++
++/* 0168: the event of malikm_kmt_frame_mark fired: everything up to seq is done */
++void
++malikm_kmt_frame_reached(uint64_t seq)
++{
++   struct sbdev *d = sb_kdev;
++   if (!d || d->on)
++      return;
++   AcquireSRWLockExclusive(&d->lock);
++   if (seq > d->done && seq <= d->seq) {
++      d->done = seq;
++      wdead_reap(d);
++   }
++   ReleaseSRWLockExclusive(&d->lock);
++}
++
+ /* ---- MALIKM_FAKE ----
+  * The driver, emulated in this process on the same marshalled buffers, for
+  * CI runners with no Mali: buffers are ordinary memory, the GET_PARAM values
+diff --git a/src/gallium/targets/wgl/wgl_sb_zc.cpp b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+index b6140af..29cdbfe 100644
+--- a/src/gallium/targets/wgl/wgl_sb_zc.cpp
++++ b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+@@ -60,6 +60,8 @@ int malikm_kmt_adapter_luid(LUID *luid);
+ int malikm_kmt_open_shared(unsigned share, struct sbzc_alloc_info *info, unsigned *res);
+ void malikm_kmt_close_shared(unsigned res);
+ int malikm_kmt_frame_wait(unsigned ms);
++int malikm_kmt_frame_mark(void *event_handle, uint64_t *seq);     /* sb-patches/0168 */
++void malikm_kmt_frame_reached(uint64_t seq);
+ }
+ 
+ static bool zc_log;
+@@ -186,6 +188,22 @@ struct sbzc_fb {
+    double t_wait, t_copy, t_present, t_war, t_max;
+    LARGE_INTEGER t300;      /* sb-patches/0160: when the last 300-frame line was written (fps) */
+    unsigned over100;        /* 0160: frames over 100 ms since that line */
++   /* sb-patches/0168: the present thread (flag file glzcasync). The game thread hands a finished frame over and
++    * goes on with the next one in the other texture; the thread waits for the GPU, copies, presents and waits for
++    * the copy. One frame at a time: a hand-over first waits until the frame before is completely through, which
++    * is also what makes the other texture free to draw into. */
++   bool async;
++   HANDLE th, ev_work, ev_idle, ev_gl;
++   volatile LONG quit;
++   struct {
++      unsigned back;
++      int interval;
++      bool marked;
++      uint64_t seq;
++      LARGE_INTEGER t0;
++      double hand;          /* ms the game thread waited for the frame before */
++   } job;
++   double t_hand;
+ };
+ 
+ static struct sbzc_fb *
+@@ -378,10 +396,154 @@ gl_idle(struct pipe_context *ctx)
+    (void)malikm_kmt_frame_wait(5000);
+ }
+ 
++/* sb-patches/0168: the frame handed to the present thread is completely through (shown, and its copy has read
++ * its texture) */
++static void
++sbzc_drain(struct sbzc_fb *fb)
++{
++   if (fb->th)
++      WaitForSingleObject(fb->ev_idle, INFINITE);
++}
++
++/* 0168: one frame on the present thread: what sbzc_present does in line otherwise */
++static void
++sbzc_async_frame(struct sbzc_fb *fb)
++{
++   LARGE_INTEGER t0 = fb->job.t0, t1, t2, t3, t4;
++   unsigned back = fb->job.back;
++   int interval = fb->job.interval;
++   bool shown = false;
++   HRESULT hr = E_FAIL;
++
++   /* 1. GL's frame is done: the event queued behind it at the hand-over, else the locking wait */
++   if (fb->job.marked) {
++      if (WaitForSingleObject(fb->ev_gl, 5000) != WAIT_OBJECT_0)
++         ZERR("the GL frame did not finish in 5 s\n");
++      else
++         malikm_kmt_frame_reached(fb->job.seq);
++   } else if (malikm_kmt_frame_wait(5000)) {
++      ZERR("the GL frame did not finish in 5 s\n");
++   }
++   double wait = ms_since(fb, t0, &t1);
++
++   AcquireSRWLockExclusive(&g_lock);
++   if (!fb->gdi && !fb->gdi_present && fb->sc && fb->tex[back]) {
++      ID3D11Texture2D *bb = NULL;
++      hr = fb->sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void **)&bb);
++      if (SUCCEEDED(hr) && bb) {
++         g_ctx->CopyResource(bb, fb->tex[back]);
++         bb->Release();
++         D3D11_BOX px = {0, 0, 0, 1, 1, 1};
++         g_ctx->CopySubresourceRegion(fb->stg[back], 0, 0, 0, 0, fb->tex[back], 0, &px);
++         fb->stg_pending[back] = true;
++         QueryPerformanceCounter(&t2);
++         hr = fb->sc->Present(interval < 0 ? 0 : interval > 4 ? 4 : (UINT)interval, 0);
++      } else {
++         QueryPerformanceCounter(&t2);
++      }
++      QueryPerformanceCounter(&t3);
++      /* the copy has read this frame's texture: the game thread may draw into it again after the next hand-over */
++      war_wait_locked(fb, back);
++      shown = SUCCEEDED(hr);
++   } else {
++      t2 = t3 = t1;
++   }
++   ReleaseSRWLockExclusive(&g_lock);
++   double total = ms_since(fb, t0, &t4);
++
++   if (!shown) {
++      fb->fails++;
++      if (fb->fails <= 8 || !(fb->fails & (fb->fails - 1)))
++         ZERR("present %u failed: 0x%08lx (%u failures); frame dropped (present thread)\n", fb->frames,
++              (unsigned long)hr, fb->fails);
++      if (++fb->fails_in_row >= 3 && !fb->gdi_present) {
++         AcquireSRWLockExclusive(&g_lock);
++         drop_swapchain_locked(fb);
++         ReleaseSRWLockExclusive(&g_lock);
++         fb->gdi_present = true;       /* the game thread presents through GDI from its next frame on */
++         ZERR("3 presents failed in a row: this window presents through GDI from now on\n");
++         zc_state("gdi-after-present-failures");
++      }
++   } else {
++      fb->fails_in_row = 0;
++   }
++
++   fb->frames++;
++   fb->t_hand += fb->job.hand;
++   fb->t_wait += wait;
++   fb->t_copy += (double)(t2.QuadPart - t1.QuadPart) * 1000.0 / (double)fb->freq.QuadPart;
++   fb->t_present += (double)(t3.QuadPart - t2.QuadPart) * 1000.0 / (double)fb->freq.QuadPart;
++   fb->t_war += (double)(t4.QuadPart - t3.QuadPart) * 1000.0 / (double)fb->freq.QuadPart;
++   if (total > fb->t_max)
++      fb->t_max = total;
++   if (total > 100.0)
++      fb->over100++;
++   if (zc_log && fb->frames % 300 == 0) {
++      double secs = fb->t300.QuadPart ? (double)(t4.QuadPart - fb->t300.QuadPart) / (double)fb->freq.QuadPart : 0;
++      ZLOG("300 frames (%ux%u, present thread): %.1f fps; per frame GL wait %.2f ms, copy+mark %.2f, Present %.2f, "
++           "WAR wait %.2f; slowest %.1f ms, %u over 100 ms; present failures %u; game thread waited %.2f ms per "
++           "hand-over\n", fb->w, fb->h, secs > 0 ? 300.0 / secs : 0.0, fb->t_wait / 300, fb->t_copy / 300,
++           fb->t_present / 300, fb->t_war / 300, fb->t_max, fb->over100, fb->fails, fb->t_hand / 300);
++      fb->t_wait = fb->t_copy = fb->t_present = fb->t_war = fb->t_max = fb->t_hand = 0;
++      fb->over100 = 0;
++      fb->t300 = t4;
++   }
++}
++
++static DWORD WINAPI
++sbzc_thread(LPVOID arg)
++{
++   struct sbzc_fb *fb = (struct sbzc_fb *)arg;
++   for (;;) {
++      WaitForSingleObject(fb->ev_work, INFINITE);
++      if (fb->quit)
++         break;
++      sbzc_async_frame(fb);
++      SetEvent(fb->ev_idle);
++   }
++   return 0;
++}
++
++/* 0168: start the present thread; false leaves the in-line present */
++static bool
++sbzc_async_start(struct sbzc_fb *fb)
++{
++   fb->ev_work = CreateEventW(NULL, FALSE, FALSE, NULL);
++   fb->ev_idle = CreateEventW(NULL, TRUE, TRUE, NULL);
++   fb->ev_gl = CreateEventW(NULL, TRUE, FALSE, NULL);
++   if (fb->ev_work && fb->ev_idle && fb->ev_gl)
++      fb->th = CreateThread(NULL, 0, sbzc_thread, fb, 0, NULL);
++   if (!fb->th) {
++      if (fb->ev_work) CloseHandle(fb->ev_work);
++      if (fb->ev_idle) CloseHandle(fb->ev_idle);
++      if (fb->ev_gl) CloseHandle(fb->ev_gl);
++      fb->ev_work = fb->ev_idle = fb->ev_gl = NULL;
++      return false;
++   }
++   return true;
++}
++
++static void
++sbzc_async_stop(struct sbzc_fb *fb)
++{
++   if (!fb->th)
++      return;
++   sbzc_drain(fb);
++   InterlockedExchange(&fb->quit, 1);
++   SetEvent(fb->ev_work);
++   WaitForSingleObject(fb->th, 5000);
++   CloseHandle(fb->th);
++   CloseHandle(fb->ev_work);
++   CloseHandle(fb->ev_idle);
++   CloseHandle(fb->ev_gl);
++   fb->th = fb->ev_work = fb->ev_idle = fb->ev_gl = NULL;
++}
++
+ static void
+ sbzc_destroy(struct stw_winsys_framebuffer *pfb, struct pipe_context *ctx)
+ {
+    struct sbzc_fb *fb = sbzc(pfb);
++   sbzc_async_stop(fb);                 /* 0168 */
+    gl_idle(ctx);
+    AcquireSRWLockExclusive(&g_lock);
+    if (fb->gdi) {
+@@ -406,6 +568,7 @@ sbzc_resize(struct stw_winsys_framebuffer *pfb, struct pipe_context *ctx, struct
+    fb->templ = *templ;
+    fb->templ.width0 = w;
+    fb->templ.height0 = h;
++   sbzc_drain(fb);                      /* 0168: no frame of the old size on the present thread */
+    if (fb->gdi) {
+       make_gdi_buffers(fb);
+       return;
+@@ -469,6 +632,25 @@ sbzc_present(struct stw_winsys_framebuffer *pfb, int interval)
+    bool shown = false;
+ 
+    QueryPerformanceCounter(&t0);
++   if (fb->th) {
++      /* sb-patches/0168: the frame before is completely through (so the other texture is free), then this one goes
++       * to the present thread and the game goes on */
++      sbzc_drain(fb);
++      if (!fb->gdi && !fb->gdi_present && fb->sc && fb->tex[back]) {
++         fb->job.hand = ms_since(fb, t0, &t1);
++         fb->job.back = back;
++         static int novs = -1;
++         if (novs < 0)
++            novs = zc_flag("glzcnovsync") || ((zc_flag("glzcflip") || zc_flag("glzcflipd")) && !zc_flag("glzcflipvsync"));
++         fb->job.interval = novs ? 0 : interval;
++         fb->job.t0 = t1;
++         fb->job.marked = malikm_kmt_frame_mark(fb->ev_gl, &fb->job.seq) == 0;
++         ResetEvent(fb->ev_idle);
++         SetEvent(fb->ev_work);
++         fb->cur = !back;
++         return true;
++      }
++   }
+    /* 1. GL's frame (flushed by stw before this call) is done */
+    if (malikm_kmt_frame_wait(5000))
+       ZERR("the GL frame did not finish in 5 s\n");
+@@ -670,6 +852,11 @@ wgl_sb_zc_create_framebuffer(struct pipe_screen *screen, HWND hWnd, int iPixelFo
+    fb->base.present = sbzc_present;
+    fb->base.get_resource = sbzc_get_resource;
+    zc_state("zc");
++   /* sb-patches/0168: with C:\\ProgramData\\Starbite\\glzcasync the waits of a present run on a thread of their own */
++   if (zc_flag("glzcasync")) {
++      fb->async = sbzc_async_start(fb);
++      ZLOG("present thread: %s\n", fb->async ? "on (glzcasync)" : "could not start, in-line present");
++   }
+    ZLOG("window %p: zero-copy present, %ux%u %s, swap effect %d\n", (void *)hWnd, w, h,
+         util_format_name(fb->pformat), (int)fb->effect);
+    return &fb->base;
+-- 
+2.43.0
+
