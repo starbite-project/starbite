@@ -3071,12 +3071,18 @@ wait 1.5 ms). **0168** (src-tc da5173f, `sb-patches/0168-wgl-zero-copy-present-t
 - **T79** (`build/win/stage/sbwddm-t79`, candidate drivers, `sb-gdruns.bat` + `sb-gd-runs.txt`): B (`glzcflipd`),
   C (`glzcflipd glzcasync`), B2, C2.
 
-### 6.104 T78 read: apps start on the candidate driver, but Edge sets off a storm of DWM job timeouts - candidate on hold
+### 6.104 T78 read: on the candidate driver Edge sets off a storm of DWM job timeouts and screen shots go black - candidate on hold
 
 (2026-11-16 05:06) **T78** (`build/win/results-t78`, the candidate: T61 kernel drivers + sbumd d39b83ab):
-- **What works:** Edge opens and shows the page (CSS animation, 2D canvas, WebGL all drawn; shot), Settings,
-  Notepad, Paint, a File Explorer window and Task Manager open and draw; Calculator runs (its process is
-  `Calculator.exe`, the script looked for another name); one DWM process for the whole boot.
+- **What the two captures show (they disagree, so "works" is not established):**
+  - DWM's own composed frames (`dump-dwm-app-*`): every app's window is there. Edge with its page (CSS animation,
+    2D canvas, WebGL), Settings, a dark Notepad window, Calculator (first its splash icon, later its "0"), a File
+    Explorer window with its command bar, Paint, Task Manager's dark window; one DWM process for the whole boot.
+    Some content areas are dark where content is expected (Explorer's file list).
+  - The screen shots (`shot-app-*`, sbshow's own capture): Edge and Settings show; **Calculator, Notepad and
+    Explorer are completely black, taskbar included; Paint and Task Manager are 91 % black** (the peer's read,
+    confirmed). Whether the panel was black then or the capture failed during the GPU-timeout storm is not known.
+  - Calculator's process is `Calculator.exe`; the script looked for another name.
 - **Edge is not accelerated:** the page's title says `WebGL: ANGLE (Google, Vulkan 1.2.0 (SwiftShader ...))`, 27-31
   fps: Chromium fell back to its software renderer. Crash events: `msedge.exe` c0000409 in ucrtbase three times at
   logon and once later, and a `bad_module_info` c0000409 three seconds after the test started Edge. c0000409 in
