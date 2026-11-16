@@ -3511,6 +3511,28 @@ Linux host; the Win32 file code is **compiled only**.)
   the same shader as separate vertex and tiler jobs: which half sticks), T88 (the new translator compiles the
   shader differently: does the hang go away).
 
+### 6.117 Chain results, part 4: T87c, the user's own driver stalls the same way
+
+(2026-11-16 19:05; `build/win/results-t87c`: the user's T61 sbumd 6d759c44 with the diagnostic KMD be555bb4; measured.)
+
+- **The same storm on T61.** Job timeouts after each step: logon 0; Settings 0 (one failed job, no timeout);
+  **Calculator: 0 at 5 s, 11 at 12 s, 35 when closed**; Notepad, Paint, Explorer, Task Manager: stays 35;
+  **Calculator kept open: 38, 48, 59 (20 s), 73 with Notepad on top, 99 after two shots; closed: 109 and it stops**;
+  Edge: stays 109. The Calculator shot is 100 % black, the two calc-hold shots 47 % black, every other shot fine.
+- **The same job:** indexed-vertex, 60 vertices (Invocation 0x3b), 144 indices (0x8f), primitive word 0x18178208,
+  negative base vertex offset; every recorded pointer `[1 2c1 d ... M -1]`, tiler heap mapped 1/1/1, 0 scratch,
+  `half-head` = `head`. Identical to T87 on the 0167 driver.
+- **So the stall is not a regression of 0159-0167.** It is in the driver the user runs today, and it shows
+  whenever a window of that kind is on screen (Calculator; by T71's record the sign-out screen too). The user's
+  earlier report of a desktop too slow to reach the Start menu fits (the Start menu is the same UI toolkit), but
+  that link is a guess, not measured.
+- **Consequences.** (1) The reason the 0167 candidate was put on hold (6.104) does not distinguish it from T61:
+  on this point both behave alike, and 0167 adds working flip-model windows and the 60 fps game path. Whether it
+  replaces T61 as the default is the user's call again. (2) Finding the shader's fault fixes a problem of the
+  everyday Windows, not only of the new builds.
+- Caveat: T87c ran T61's sbumd on the diagnostic KMD, not on the user's d85e0d3a. The KMD difference is the hang
+  records only (and `VtTimeoutMs` at its default).
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
