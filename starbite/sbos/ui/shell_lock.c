@@ -1065,8 +1065,9 @@ static void build_etool(void)
  * leaving. survival-next: the four tools after the concept's four (USB Power, Sun, Guide, Compass / Level); the
  * list scrolls; ecard[5] and [6] hold cards 4..7, drawn one per idle turn (shell_survival.inc: sv_idle). survival-next (the merge): two
  * cards a layer below the fold (5 MB each, not one 8 MB layer: the 160 MiB heap's holes refused it in Emergency) */
-#define NEC 7                           /* 0 cards 0..3, 4 Exit, 5 cards 4..5, 6 cards 6..7 */
-#define EC_LAYER(i) (&ecard[5 + ((i) - 4) / 2])   /* the layer of card i (4..7) */
+#define NEC 8                           /* 0 cards 0..3, 4 Exit, 5 cards 4..5, 6 cards 6..7, 7 card 8 (9k: Fire Starter) */
+#define EC_LAYER(i) (&ecard[5 + ((i) - 4) / 2])   /* the layer of card i (4..8) */
+#define NECARD 9                        /* 9k: the cards (the Fire Starter the ninth) */
 static tk_layer ecard[NEC], empill;
 /* 8w (the user, 11-15): Emergency's "Call 112" capsule, fixed between the lock's two holds (it never scrolls): restarts
  * into One UI after the platform's hold to confirm (shell_comms.inc: cm_call112) */
@@ -1074,10 +1075,10 @@ static tk_layer em112;
 #define EM112_W 132.0f
 #define EM112_H 44.0f
 #define EM112_Y 705.0f
-static int ec_next = 8;                 /* survival-next: cards 4..7 drawn so far */
+static int ec_next = NECARD;            /* survival-next: cards 4..8 drawn so far */
 static int ec_wait;                     /* B6: Emergency's first cards or Exit not drawn yet (hidden till then) */
 typedef struct { const char *icon, *t, *s, *act; } ecard_t;   /* act: the app it opens (none: a toast) */
-static const ecard_t EC[8] = {
+static const ecard_t EC[NECARD] = {
     { "e46-heat", "Survival Heat", "Warms hands or a cold battery \xc2\xb7 stops by itself", "heat" },   /* 9j: in Next */
     { "e46-power", "Last 2 %", "Everything off but the clock, the torch and SOS", "power" },
     { "e46-sos", "Emergency SOS", "Morse SOS on the torch, the motor and the screen", "sos" },
@@ -1085,7 +1086,8 @@ static const ecard_t EC[8] = {
     { "usb", "USB Power", "5 V out of the USB-C port: a fire starter", "usb" },
     { "sun", "Sun", 0, "sun" },
     { "guide", "Survival Guide", "First aid, water, shelter, signals: offline", "guide" },
-    { "compass", "Compass / Level", "Heading, level and steps: live from the sensors", "compass" } };
+    { "compass", "Compass / Level", "Heading, level and steps: live from the sensors", "compass" },
+    { "fire", "Fire Starter", "Heats a wire or steel wool from the USB-C port", "fire" } };   /* 9k */
 /* cp7i: a card in two parts (0 its glass, 1 its icon and words; -1 both): sv_idle makes one an idle turn */
 static void ec_card_part(dc *d, int i, float top, int part)
 {
@@ -1104,7 +1106,7 @@ static void ec_card_part(dc *d, int i, float top, int part)
 static void ec_card(dc *d, int i, float top) { ec_card_part(d, i, top, -1); }
 /* (the first four cards in one layer, each card's backdrop what is drawn before it, as in the list; then Exit, then
  * the layers of cards 4..7: B6's ep_card, a piece at a time, below set_emergency) */
-static void free_ecards(void) { for (int i = 0; i < NEC; i++) { relayer(&ecard[i]); ecard[i].hidden = 1; } ec_next = 8; relayer(&em112); em112.hidden = 1; }
+static void free_ecards(void) { for (int i = 0; i < NEC; i++) { relayer(&ecard[i]); ecard[i].hidden = 1; } ec_next = NECARD; relayer(&em112); em112.hidden = 1; }
 static int cards_pending;       /* the platter glass, the vendor cards and the tools still to make again after Emergency (one per idle turn) */
 static void build_lockpart(int i) { if (i == 0) build_platter_gh(); else if (i == 1) build_platter_face(); else if (i <= NG + 1) build_vcard(i - 2); else build_etool(); }
 #define LOCK_PARTS (NG + 3)
@@ -1312,6 +1314,7 @@ static void place_list(void)
     ecard[0].hidden = ecard[4].hidden = !EMG || ec_wait;
     ecard[5].hidden = !EMG || ec_next <= 4;          /* survival-next: shown from its first card */
     ecard[6].hidden = !EMG || ec_next <= 6;
+    ecard[7].hidden = !EMG || ec_next <= 8;          /* 9k */
     em112.hidden = !EMG || ec_wait || !em112.bmp.px;  /* 8w */
     list.y = PT(-scroll);
     float lh = EMG ? LIST_H : list_h();
@@ -3219,6 +3222,7 @@ static const appdef APPS[] = {
     { "heat", "Survival Heat", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },    /* 9j: shell_survival.inc */
     { "power", "Last 2 %", 0xe09f1f, 1, { { "", 1, { { "", "" } } } } },      /* survival-next: shell_survival.inc */
     { "usb", "USB Power", 0xe0461f, 1, { { "", 1, { { "", "" } } } } },
+    { "fire", "Fire Starter", 0xd70015, 1, { { "", 1, { { "", "" } } } } },     /* 9k: shell_survival.inc */
     { "sun", "Sun", 0xff8a00, 1, { { "", 1, { { "", "" } } } } },
     { "guide", "Survival Guide", 0x1f8a4c, 1, { { "", 1, { { "", "" } } } } },
     { "compass", "Compass / Level", 0x55555c, 1, { { "", 1, { { "", "" } } } } },
@@ -4973,7 +4977,7 @@ static void ep_card(void)
         dc d = { &ecard[0].bmp, &ecard[0].glass, ecard[0].x, ecard[0].y };
         ec_card(&d, i, LIST_TOP + 10 + 78 * i);
     } else if (i == 4) {
-        float top = LIST_TOP + 10 + 78 * 8 - 10 + 12, w = 14 + tw(TK_IT600, 13, "Exit Emergency", 0, 0) + 14, x = 195 - w / 2;
+        float top = LIST_TOP + 10 + 78 * NECARD - 10 + 12, w = 14 + tw(TK_IT600, 13, "Exit Emergency", 0, 0) + 14, x = 195 - w / 2;
         dc d = mk(&ecard[4], "eexit", x, top, w, 32, 44, 1);
         ecard[4].hidden = 1;
         d_glass(&d, x, top, w, 32, 16, 1, 1);
@@ -4996,8 +5000,9 @@ static void ep_card(void)
         relink();
     } else {
         /* survival-next: cards 4..7 below the fold: their layers now, the cards at the next idle turns (sv_idle) */
-        for (int k = 0; k < 2; k++) {
-            mk(&ecard[5 + k], k ? "ecards3" : "ecards2", CARD_X, LIST_TOP + 10 + 78 * (4 + 2 * k), CARD_W, 78 + 68, FACE_MG, 0);
+        for (int k = 0; k < 3; k++) {       /* 9k: the third holds the ninth card alone */
+            mk(&ecard[5 + k], k == 2 ? "ecards4" : k ? "ecards3" : "ecards2", CARD_X, LIST_TOP + 10 + 78 * (4 + 2 * k), CARD_W,
+               k == 2 ? 68 : 78 + 68, FACE_MG, 0);
             ecard[5 + k].hidden = 1;
         }
         ec_next = 4;

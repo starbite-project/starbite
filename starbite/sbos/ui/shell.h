@@ -278,6 +278,24 @@ typedef struct {
     int target_c10, surv_bat_c10;             /* Keep warm's target; Survival's battery limit */
     char why[64];                             /* a stop's or a refusal's words */
 } sh_heat_t;
+/* 9k: the USB-C fire starter (kern/survival.c, the fire-starter session's 1.2-alpha30): a pulse only while the finger
+ * stays on the control (sh_fire_finger), the kernel's limits; the override (Re-arm / MAX) only where the kernel allows
+ * it (sh_fire_override_ok: a card with /STARBITE/FIRE/OVERRIDE.TXT, S9 #2's) */
+enum { SH_FIRE_OFF, SH_FIRE_ON, SH_FIRE_COOL };
+enum { SH_FW_NONE, SH_FW_DONE, SH_FW_RELEASED, SH_FW_ILIM, SH_FW_VBUS, SH_FW_FAULT, SH_FW_HOT, SH_FW_LOWBAT, SH_FW_STOP,
+       SH_FW_REFUSED, SH_FW_COOL, SH_FW_FINGER };    /* = SURV_FS_WHY_* */
+typedef struct {
+    int state, fire, ms_left, est_ma;         /* fire 2: the fire starter's session */
+    int n, max, out, rearms, elapsed_ms;      /* pulses done, at most; the output on now; MAX's re-arms, time on */
+    int avg_ma, peak_ma, w10, load_w10, ohm10, open;   /* the last pulse (MAX: the last 1 s): ohm10 -1 ?, -2 at the limit */
+    int why_code, bat_c10;
+    const char *why;                          /* words (NULL none) */
+} sh_fire_t;
+int sh_fire_start(int pulse_ms, int repeat, int ilim_ma, int ov, int wool);   /* < 0 refused (why in sh_fire) */
+void sh_fire_finger(int down);
+void sh_fire_stop(void);
+void sh_fire(sh_fire_t *f);
+int sh_fire_override_ok(void);
 int sh_heat_start(int level, int minutes);    /* < 0 refused (why in sh_heat); 0 asked (a confirmation may show) */
 void sh_heat_stop(void);
 void sh_heat(sh_heat_t *h);

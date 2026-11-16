@@ -413,6 +413,26 @@ void sh_usb(sh_usb_t *u)
     u->ms_left = s.ms_left, u->est_ma = s.est_ma, u->vbus_lo_mv = s.vbus_lo_mv, u->vbus_hi_mv = s.vbus_hi_mv;
     u->bat_c10 = s.bat_c10, u->limit_c10 = s.limit_c10, u->ilim_ma = s.ilim_ma, u->refused = s.refused, u->why = s.why, u->events = s.events;
 }
+/* 9k: the fire starter's pretend output (a 5 ohm lead, a pulse in progress while the finger stays) */
+static struct { int on, down, ov; uint64_t t0; } hfire;
+int sh_fire_start(int pulse_ms, int repeat, int ilim_ma, int ov, int wool)
+{
+    fprintf(stderr, "fire starter: start %d ms, repeat %d, %d mA, override %d, steel wool %d (pretend)\n", pulse_ms, repeat, ilim_ma, ov, wool);
+    if (!hfire.down) return -1;
+    hfire.on = 1, hfire.ov = ov, hfire.t0 = surv_host_now_ms;
+    return 0;
+}
+void sh_fire_finger(int down) { hfire.down = down; if (!down && hfire.on) { hfire.on = 0; fprintf(stderr, "fire starter: the finger lifted: off\n"); } }
+void sh_fire_stop(void) { hfire.on = 0; }
+void sh_fire(sh_fire_t *f)
+{
+    memset(f, 0, sizeof(*f));
+    f->state = hfire.on ? SH_FIRE_ON : SH_FIRE_OFF;
+    f->fire = 2, f->out = hfire.on, f->n = 1, f->max = hfire.ov ? 1 : 6;
+    f->avg_ma = 1420, f->peak_ma = 1490, f->load_w10 = 57, f->ohm10 = 50, f->bat_c10 = 331;
+    f->why_code = hfire.on ? SH_FW_NONE : SH_FW_RELEASED;
+}
+int sh_fire_override_ok(void) { return 0; }
 /* 9j: Survival Heat's pretend heater (the kernel's confirmations are not simulated: it starts at once) */
 static struct { int on, level, min; uint64_t t0; } hheat;
 int sh_heat_start(int level, int minutes)
