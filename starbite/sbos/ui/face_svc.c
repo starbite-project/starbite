@@ -274,8 +274,28 @@ static void run_engine(void (*on_det)(void), void (*on_emb)(void), int may_feed)
 }
 
 /* -- the scan */
+/* round 2: the face's box (a little larger) to the camera's metering: the exposure is set on the face, not the room */
+static void tell_roi(void)
+{
+    if (!P.cam_roi) return;
+    if (!F.eng.nfaces) { P.cam_roi(0, 0, 0, 0, 0); return; }
+    float x = F.eng.det.x + F.eng.det.w * 0.15f, y = F.eng.det.y + F.eng.det.h * 0.1f;
+    float w = F.eng.det.w * 0.7f, h = F.eng.det.h * 0.8f;   /* the skin: no hair, no background */
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (w >= 4 && h >= 4) P.cam_roi(1, (unsigned)x, (unsigned)y, (unsigned)w, (unsigned)h);
+}
+/* round 2: frames before the exposure settles look nothing like the set-up's (9i: "never recognises"); they are
+ * used once it has settled, or after 0.5 s from the first frame whatever it is (Speed stays quick) */
+static int frame_usable(void)
+{
+    if (!P.cam_settled || P.cam_settled()) return 1;
+    return F.t_first && P.now_ms() - F.t_first >= 500;
+}
 static void scan_det(void)
 {
+    tell_roi();
+    if (!frame_usable()) return;
     face_scan_det(&F.scan, F.eng.nfaces, &F.eng.det, &F.eng.sig, P.now_ms());
     /* an embedding of this frame when none is running and the face is big and bright enough to be worth it */
     if (F.eng.nfaces && !F.eng.emb_busy && F.eng.sig.size >= FACE_MIN_SIZE && F.eng.sig.bright >= 20) (void)face_eng_embed(&F.eng);
@@ -339,7 +359,9 @@ static void scan_tick(void)
 /* -- set-up */
 static void enrol_det(void)
 {
+    tell_roi();
     if (!F.eng.nfaces) { F.hint = SH_FH_NONE; return; }
+    if (P.cam_settled && !P.cam_settled()) return;     /* the set-up only from settled frames */
     F.hint = F.eng.sig.size < FACE_CLOSER_SIZE ? SH_FH_CLOSER : F.eng.sig.bright < 35 ? SH_FH_LIGHT : SH_FH_NONE;
     if (!F.eng.emb_busy && face_enrol_det(&F.en, &F.eng.sig, F.eng.det.score) >= 0) {
         if (face_eng_embed(&F.eng) < 0) F.en.want = -1;
@@ -467,7 +489,7 @@ int fsvc_bench_start(void)
 
 /* -- the face test image: the camera with nobody enrolled (an empty template set: no match is possible) */
 static uint32_t camtest_ms;
-static void camtest_det(void) { if (F.eng.nfaces && !F.eng.emb_busy) (void)face_eng_embed(&F.eng); }
+static void camtest_det(void) { tell_roi(); if (F.eng.nfaces && !F.eng.emb_busy) (void)face_eng_embed(&F.eng); }
 static void camtest_emb(void) { }
 static void camtest_tick(void)
 {

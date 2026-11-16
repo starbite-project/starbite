@@ -37,6 +37,7 @@
 #include "haptic.h"
 #include "nledpol.h"
 #include "face_svc.h"                     /* Face Unlock (ui/face_svc.c on kern/face.c) */
+#include "face.h"
 static void drv_timer(unsigned id);             /* Track A: drivers for the shell (the end of this file) */
 static void snd_tick(unsigned id);              /* Track A, cp7: sound (the end of this file) */
 static void snd_boot(void);                     /* cp7y: snd up (Calliope's files into RAM) at the bake's end */
@@ -3209,6 +3210,17 @@ static void fs_random(uint8_t *out, unsigned n)
     }
 }
 static void fs_log(const char *line) { sb_logf("next: ", line); }
+static void fs_cam_roi(int valid, unsigned x, unsigned y, unsigned w, unsigned h)
+{
+    struct cam_roi r = { valid, x, y, w, h };
+    cam_set_roi(&r);
+}
+static int fs_cam_settled(void)
+{
+    struct cam_ae_info i;
+    cam_ae_info(&i);
+    return i.settled;
+}
 static uint64_t fs_ms(void) { return sb_ms(); }
 static void *fs_alloc(size_t n) { return tk_alloc(n); }
 static void fs_par(void (*fn)(void *, int), void *arg, int n) { kpar(fn, arg, n); }
@@ -3228,6 +3240,8 @@ static void face_init(void)
     p.cam_open = fs_cam_open;
     p.cam_frame = fs_cam_frame;
     p.cam_close = fs_cam_close;
+    p.cam_roi = fs_cam_roi;
+    p.cam_settled = fs_cam_settled;
     p.blob_get = sh_blob_get;
     p.blob_put = sh_blob_put;
     p.pref_int = sh_pref_int;
@@ -3278,6 +3292,46 @@ static void face_tick(void)
  * detections); 1 passed, -1 failed, 0 running. The loop's turns of 100 ms or more are counted by uitest.c's caller. */
 static int ftest_phase;
 static uint64_t ftest_t;
+/* round 2 (2026-11-16, attended: the user looks at the phone from the boot's ~20 s for ~10 s): after the pack and the
+ * bench, the camera runs 9 s with the face test's detections; at 0.4, 1.5, 3, 5 and 7.5 s the whole raw frame
+ * (1632 x 1224, 16-bit: two slots) and the preview the phone shows (v2, 360 x 480) are copied into the heap; then
+ * saved into the store entry "sbos-facedbg" (photos.c's format, never the user's photos; made with store-update.sh
+ * --volatile sbos-facedbg=67108864). The Mac pulls them (tools/face/facedbg-pull.py) and runs v1 / v2 / new tunings
+ * on the raw. The saves block (~0.3 s each): their turns are not counted (face_selftest_excluded). */
+#define FT_CAPS 5
+static const uint32_t ft_at[FT_CAPS] = { 400, 1500, 3000, 5000, 7500 };
+static uint16_t *ft_raw[FT_CAPS];
+static uint32_t *ft_pv[FT_CAPS];
+static uint32_t ft_lines[FT_CAPS], ft_gain[FT_CAPS], ft_luma[FT_CAPS];
+static int ft_cap, ft_save, ft_saved, ft_save_fail;
+static uint32_t ft_turns0, ft_excluded;
+static uint64_t ft_cam_t0;
+uint32_t face_selftest_excluded(void) { return ft_excluded; }
+static void ft_free(void)
+{
+    for (int i = 0; i < FT_CAPS; i++) {
+        if (ft_raw[i]) tk_free(ft_raw[i]);
+        if (ft_pv[i]) tk_free(ft_pv[i]);
+        ft_raw[i] = 0;
+        ft_pv[i] = 0;
+    }
+}
+/* the item k of the saves: per capture the raw's top half, its bottom half, the preview */
+static int ft_save_one(int k)
+{
+    int c = k / 3, part = k % 3;
+    if (!ft_raw[c]) return 0;
+    if (part == 2) return ft_pv[c] ? sh_photo_save(ft_pv[c], FACE_FRAME_W, FACE_FRAME_H) : 0;
+    /* 1632 x 612 samples (16-bit) as 1632 x 408 pixels of three bytes: the raw's bytes in order */
+    uint32_t *px = tk_alloc((size_t)1632 * 408 * 4);
+    if (!px) return -1;
+    const uint8_t *b = (const uint8_t *)(ft_raw[c] + (size_t)part * 1632 * 612);
+    for (size_t i = 0; i < (size_t)1632 * 408; i++)
+        px[i] = 0xFF000000u | (uint32_t)b[3 * i] << 16 | (uint32_t)b[3 * i + 1] << 8 | b[3 * i + 2];
+    int r = sh_photo_save(px, 1632, 408);
+    tk_free(px);
+    return r;
+}
 int face_selftest_step(void)
 {
     switch (ftest_phase) {
@@ -3299,13 +3353,69 @@ int face_selftest_step(void)
         return 0;
     case 2:
         if (fsvc_busy()) return 0;
-        if (!fsvc_camera_test(4000)) { sb_log("selftest: next-face: FAILED: the camera test did not start (the camera?)"); return -1; }
+        sb_log("selftest: next-face: LOOK AT THE PHONE now (about 30 cm), for 10 s: the camera runs 9 s");
+        if (!fsvc_camera_test(9000)) { sb_log("selftest: next-face: FAILED: the camera test did not start (the camera?)"); return -1; }
+        ft_cam_t0 = sb_ms();
+        ft_cap = 0;
         ftest_phase = 3;
         return 0;
     case 3:
+        /* the captures, one a step (each: ~4 MB of uncached raw, the preview) */
+        if (ft_cap < FT_CAPS && face_cam && sb_ms() - ft_cam_t0 >= ft_at[ft_cap]) {
+            struct cam_ae_info ai;
+            cam_ae_info(&ai);
+            ft_raw[ft_cap] = tk_alloc((size_t)1632 * 1224 * 2);
+            ft_pv[ft_cap] = tk_alloc((size_t)FACE_FRAME_W * FACE_FRAME_H * 4);
+            unsigned seq = 0;
+            const uint32_t *pv = fs_cam_frame(&seq);
+            if (ft_raw[ft_cap] && cam_raw_crop(ft_raw[ft_cap], 0, 0, 1632, 1224) < 0) { tk_free(ft_raw[ft_cap]); ft_raw[ft_cap] = 0; }
+            if (ft_pv[ft_cap] && pv) tk_memcpy(ft_pv[ft_cap], pv, (size_t)FACE_FRAME_W * FACE_FRAME_H * 4);
+            ft_lines[ft_cap] = ai.lines, ft_gain[ft_cap] = ai.again * ai.dgain / 256u, ft_luma[ft_cap] = ai.luma;
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "next: face: capture ");
+            ub_dec(&u, (uint64_t)ft_cap);
+            ub_s(&u, " at ");
+            ub_dec(&u, sb_ms() - ft_cam_t0);
+            ub_s(&u, " ms: raw ");
+            ub_s(&u, ft_raw[ft_cap] ? "ok" : "MISSING");
+            ub_s(&u, ", exposure ");
+            ub_dec(&u, ai.lines);
+            ub_s(&u, " lines, gain x");
+            ub_dec(&u, ai.again * ai.dgain / 8192u);
+            ub_s(&u, ", luma ");
+            ub_dec(&u, ai.luma);
+            ub_s(&u, ai.settled ? " (settled)" : " (moving)");
+            ub_s(&u, ", wb r ");
+            ub_dec(&u, ai.wb_r);
+            ub_s(&u, " b ");
+            ub_dec(&u, ai.wb_b);
+            sb_log(u.b);
+            ft_cap++;
+        }
         if (fsvc_busy()) return 0;
+        if (!fsvc_result_first_frame_ms()) { sb_log("selftest: next-face: FAILED: no camera frame"); ft_free(); return -1; }
+        /* the saves: their turns are excluded from the test's count */
+        kphotos_entry("sbos-facedbg");
+        ft_turns0 = K.turns_100;
+        ft_save = ft_saved = ft_save_fail = 0;
         ftest_phase = 4;
-        if (!fsvc_result_first_frame_ms()) { sb_log("selftest: next-face: FAILED: no camera frame"); return -1; }
+        return 0;
+    case 4:
+        if (ft_save < FT_CAPS * 3) {
+            int r = ft_save_one(ft_save);
+            if (r == 0 && ft_raw[ft_save / 3]) ft_saved++;
+            else if (r < 0) {
+                ft_save_fail++;
+                if (ft_save_fail == 1) sb_logf("next: face: a frame was not saved: ", sh_photo_why());
+            }
+            ft_save++;
+            return 0;
+        }
+        ft_excluded = K.turns_100 - ft_turns0;
+        kphotos_entry(0);
+        ft_free();
+        ftest_phase = 5;
         {
             struct ub u;
             ub_init(&u);
@@ -3315,9 +3425,16 @@ int face_selftest_step(void)
             ub_dec(&u, FP.load_ms);
             ub_s(&u, " ms, SHA-256 good; the camera's first frame after ");
             ub_dec(&u, (uint64_t)fsvc_result_first_frame_ms());
-            ub_s(&u, " ms (bench and camera lines above)");
+            ub_s(&u, " ms; frames saved into sbos-facedbg: ");
+            ub_dec(&u, (uint64_t)ft_saved);
+            ub_s(&u, " of ");
+            ub_dec(&u, FT_CAPS * 3);
+            ub_s(&u, " (their ");
+            ub_dec(&u, ft_excluded);
+            ub_s(&u, " slow turns not counted)");
             sb_log(u.b);
         }
+        if (!ft_saved) sb_log("selftest: next-face: NOTE: no frame saved (no sbos-facedbg entry? store-update.sh --volatile sbos-facedbg=67108864)");
         return 1;
     }
     return -1;

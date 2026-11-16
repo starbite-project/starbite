@@ -63,8 +63,24 @@ static struct {
 static uint8_t hb[4096], rb[4096];
 static int force_dry;
 
+/* Face Unlock round 2: the face test image keeps its frames in an entry of its own ("sbos-facedbg", the same format),
+ * never in the user's photos; that entry (and only that one) is written in a self-test image too */
+static const char *ph_name = PH_NAME;
+static int ph_test_entry;
+void kphotos_entry(const char *name)
+{
+    int other = name && name[0];
+    if (other) {
+        const char *a = name, *b = PH_NAME;
+        while (*a && *a == *b) a++, b++;
+        other = *a != *b;
+    }
+    ph_name = other ? name : PH_NAME;
+    ph_test_entry = other;
+    P.scanned = 0;
+}
 void kphotos_dry(int on) { force_dry = on; }
-static int dry(void) { return force_dry || sbos_selftest_enabled; }
+static int dry(void) { return force_dry || (sbos_selftest_enabled && !ph_test_entry); }
 const char *kphotos_why(void) { return P.why ? P.why : ""; }
 
 static int fail(const char *why)
@@ -146,9 +162,14 @@ static void sort(void)
 static int entry(void)
 {
     struct store_ent e;
-    if (!store_find("home:" PH_NAME, &e) || !(e.flags & 1U) || e.size < PH_ENTRY || (e.size & 4095U)) {
+    char key[48] = "home:";
+    unsigned n = 5;
+    for (const char *c = ph_name; *c && n + 1 < sizeof key; c++) key[n++] = *c;
+    key[n] = 0;
+    if (!store_find(key, &e) || !(e.flags & 1U) || e.size < PH_ENTRY || (e.size & 4095U)) {
         P.scanned = 0;
-        P.why = "This phone has no photo storage (the store entry sbos-photos).";
+        P.why = ph_test_entry ? "No store entry for the face test's frames (sbos-facedbg)."
+                              : "This phone has no photo storage (the store entry sbos-photos).";
         return 0;
     }
     if (P.scanned && (e.lba != P.e.lba || e.medium != P.e.medium)) P.scanned = 0;
@@ -176,7 +197,9 @@ static int scan(void)
     ub_init(&u);
     ub_s(&u, "photos: ");
     ub_dec(&u, (uint64_t)P.n);
-    ub_s(&u, " in \"" PH_NAME "\" at ");
+    ub_s(&u, " in \"");
+    ub_s(&u, ph_name);
+    ub_s(&u, "\" at ");
     ub_s(&u, P.med == SB_MED_SD ? "sd:" : "ufs:");
     ub_dec(&u, P.e.lba);
     ub_s(&u, ", ");
@@ -204,7 +227,7 @@ static int refused(void)
 static int grant(int k, uint64_t first, uint64_t count)
 {
     struct store_ent e;
-    if (!store_volatile_grant_part(PH_NAME, PH_ENTRY, (uint64_t)k * PH_SLOT_BLOCKS + first, count, &e) ||
+    if (!store_volatile_grant_part(ph_name, PH_ENTRY, (uint64_t)k * PH_SLOT_BLOCKS + first, count, &e) ||
         e.lba != P.e.lba)
         return 0;
     hw_slot_lend();

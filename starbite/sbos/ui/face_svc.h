@@ -20,6 +20,10 @@ struct fsvc_plat {
     int (*cam_open)(unsigned w, unsigned h);
     const uint32_t *(*cam_frame)(unsigned *seq);
     void (*cam_close)(void);
+    /* round 2 (may be 0): the face's box to the camera's exposure (frame pixels; valid 0: none), the exposure
+     * settled (1) or still moving (0) */
+    void (*cam_roi)(int valid, unsigned x, unsigned y, unsigned w, unsigned h);
+    int (*cam_settled)(void);
     int (*blob_get)(const char *name, void *p, unsigned cap);
     int (*blob_put)(const char *name, const void *p, unsigned n);   /* n 0 = delete */
     int (*pref_int)(const char *key, int def);

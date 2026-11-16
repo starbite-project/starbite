@@ -139,9 +139,13 @@ int face_scan_live(const struct face_scan *s);              /* Security's livene
 
 /* ---- enrolment --------------------------------------------------------------------------------------------- */
 enum { FB_CENTRE = 0, FB_LEFT, FB_RIGHT, FB_UP, FB_DOWN };
+#define FACE_ENROL_CENTRE_N 3           /* round 2: embeddings averaged into the centre's template (others: 2) */
+#define FACE_ENROL_POSE_N 2
 struct face_enrol {
-    int have;                           /* bit per pose */
-    float q[FACE_NTPL];                 /* each pose's kept quality */
+    int have;                           /* bit per pose with its embeddings all in */
+    float q[FACE_NTPL];                 /* (unused since round 2) */
+    float acc[FACE_NTPL][FACE_DIM];     /* each pose's embeddings summed (the template is their normalised mean) */
+    int cnt[FACE_NTPL];
     float pitch0, yaw0;                 /* the centre pose's pitch and yaw (the others are relative to them) */
     int centre_n;
     float eye_sum;
@@ -151,11 +155,12 @@ struct face_enrol {
     float pend_pitch, pend_yaw, pend_q, pend_eye;   /* that detection's signals */
 };
 void face_enrol_begin(struct face_enrol *en);
-/* a detection: the pose it fills (FB_*) when it is a better one than kept (then embed it), else -1 */
+/* a detection: the pose it adds to (FB_*: then embed it) while that pose wants more embeddings, else -1 */
 int face_enrol_det(struct face_enrol *en, const struct face_sig *g, float score);
 /* its embedding: 1 kept, 0 refused (not the same person as the centre pose: < 0.5) */
 int face_enrol_emb(struct face_enrol *en, const float *emb);
 int face_enrol_done(const struct face_enrol *en);           /* every pose */
 int face_enrol_count(const struct face_enrol *en);
+int face_enrol_seen(const struct face_enrol *en);      /* bit per pose with at least one embedding */
 
 #endif

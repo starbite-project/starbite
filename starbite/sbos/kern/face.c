@@ -576,7 +576,7 @@ void face_enrol_begin(struct face_enrol *en)
  * own yaw and pitch (landmarks have a small bias per face, and "straight" is the person's own) */
 static int pose_of(const struct face_enrol *en, const struct face_sig *g)
 {
-    if (!(en->have & 1)) return g->yaw > -0.10f && g->yaw < 0.10f ? FB_CENTRE : -1;
+    if (!en->cnt[FB_CENTRE]) return g->yaw > -0.10f && g->yaw < 0.10f ? FB_CENTRE : -1;
     float dy = g->yaw - en->yaw0, dp = g->pitch - en->pitch0;
     if (dy < -0.12f) return FB_LEFT;
     if (dy > 0.12f) return FB_RIGHT;
@@ -594,7 +594,7 @@ int face_enrol_det(struct face_enrol *en, const struct face_sig *g, float score)
     int p = pose_of(en, g);
     if (p < 0) return -1;
     float q = score * (g->size < 0.15f ? g->size / 0.15f : 1);
-    if ((en->have >> p & 1) && q <= en->q[p] + 0.02f) return -1;
+    if (en->cnt[p] >= (p == FB_CENTRE ? FACE_ENROL_CENTRE_N : FACE_ENROL_POSE_N)) return -1;   /* this pose is full */
     en->want = p;
     en->pend_pitch = g->pitch;
     en->pend_yaw = g->yaw;
@@ -602,19 +602,30 @@ int face_enrol_det(struct face_enrol *en, const struct face_sig *g, float score)
     en->pend_eye = g->eye;
     return p;
 }
+static void enrol_mean(const struct face_enrol *en, int p, float *out)
+{
+    float n = 0;
+    for (int k = 0; k < FACE_DIM; k++) n += en->acc[p][k] * en->acc[p][k];
+    n = n > 0 ? 1.0f / face_sqrtf(n) : 0;
+    for (int k = 0; k < FACE_DIM; k++) out[k] = en->acc[p][k] * n;
+}
 int face_enrol_emb(struct face_enrol *en, const float *emb)
 {
     int p = en->want;
     en->want = -1;
     if (p < 0) return 0;
-    if (p != FB_CENTRE || (en->have & 1)) {
-        float tv[FACE_DIM];
-        for (int k = 0; k < FACE_DIM; k++) tv[k] = (float)en->t.v[FB_CENTRE][k];
-        if (face_cos(tv, emb) < 0.5f) return 0;   /* someone else, or a bad frame */
+    if (en->cnt[FB_CENTRE]) {                       /* the same person as the centre's mean so far */
+        float c[FACE_DIM];
+        enrol_mean(en, FB_CENTRE, c);
+        if (face_cos(c, emb) < 0.5f) return 0;     /* someone else, or a bad frame */
     }
-    face_tpl_put(&en->t, p, emb);
+    for (int k = 0; k < FACE_DIM; k++) en->acc[p][k] += emb[k];
+    en->cnt[p]++;
+    float m[FACE_DIM];
+    enrol_mean(en, p, m);
+    face_tpl_put(&en->t, p, m);
     en->q[p] = en->pend_q;
-    en->have |= 1 << p;
+    if (en->cnt[p] >= (p == FB_CENTRE ? FACE_ENROL_CENTRE_N : FACE_ENROL_POSE_N)) en->have |= 1 << p;
     if (p == FB_CENTRE) {
         if (!en->centre_n) { en->pitch0 = en->pend_pitch; en->yaw0 = en->pend_yaw; }   /* the first centre sets "straight" */
         en->centre_n++;
@@ -623,7 +634,7 @@ int face_enrol_emb(struct face_enrol *en, const float *emb)
     }
     en->t.n = FACE_NTPL;                        /* the record always has five rows; missing ones copy the centre */
     for (int i = 0; i < FACE_NTPL; i++)
-        if (!(en->have >> i & 1)) copy(en->t.v[i], en->t.v[FB_CENTRE], FACE_DIM);
+        if (!en->cnt[i]) copy(en->t.v[i], en->t.v[FB_CENTRE], FACE_DIM);
     en->t.eye_ref = en->eye_n ? en->eye_sum / (float)en->eye_n : 0;
     return 1;
 }
@@ -633,4 +644,11 @@ int face_enrol_count(const struct face_enrol *en)
     int n = 0;
     for (int i = 0; i < FACE_NTPL; i++) n += en->have >> i & 1;
     return n;
+}
+/* the poses with at least one embedding (the set-up screen's arcs light as soon as a pose is seen) */
+int face_enrol_seen(const struct face_enrol *en)
+{
+    int b = 0;
+    for (int i = 0; i < FACE_NTPL; i++) b |= (en->cnt[i] > 0) << i;
+    return b;
 }

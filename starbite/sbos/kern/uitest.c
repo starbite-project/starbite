@@ -201,6 +201,7 @@ void guest_power_off(void);
 #endif
 #ifdef SBOS_SELFTEST_NEXT_FACE
 int next_ready(void), face_selftest_step(void);     /* ui/kern_next.c: Face Unlock's test image */
+uint32_t face_selftest_excluded(void);              /* (its frames' saves: slow turns not counted) */
 #endif
 #ifdef SBOS_SELFTEST_NEXT
 void next_selftest_begin(void);
@@ -953,21 +954,21 @@ void selftest_timer(unsigned id)
         return;
 #endif
 #ifdef SBOS_SELFTEST_NEXT_FACE
-    case 145: {                             /* every 100 ms once the shell is baked; 120 s at most */
+    case 145: {                             /* every 100 ms once the shell is baked; 180 s at most */
         static uint32_t turns0;
         static int started;
         if (!started && next_ready()) { started = 1; turns0 = K.turns_100; }
         int r = started ? face_selftest_step() : 0;
-        if (!r && sb_ms() - t0 < 120000U) {
+        if (!r && sb_ms() - t0 < 180000U) {
             kt_set(KT_SELFTEST, 0, sb_ms(), 100, 0);
             return;
         }
-        uint32_t slow = K.turns_100 - turns0;
-        sb_logx("selftest: next-face: loop turns of 100 ms or more during the test: ", slow);
+        uint32_t slow = K.turns_100 - turns0 - face_selftest_excluded();
+        sb_logx("selftest: next-face: loop turns of 100 ms or more during the test (not the saves): ", slow);
         if (r > 0 && slow) r = -1;
         sb_logx(r > 0 ? "selftest: next-face: PASSED; a restart into recovery (pmsg) after seconds " :
                 r < 0 ? "selftest: next-face: FAILED (see above); a restart into recovery (pmsg) after seconds " :
-                        "selftest: next-face: FAILED: not done within 120 s; a restart into recovery (pmsg) after seconds ",
+                        "selftest: next-face: FAILED: not done within 180 s; a restart into recovery (pmsg) after seconds ",
                 (sb_ms() - t0) / 1000U);
         phase = 146;
         kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
