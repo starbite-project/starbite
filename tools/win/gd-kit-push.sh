@@ -18,7 +18,13 @@ if [ "${1:-}" = --show ]; then
     adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o ro $NTFS $W" >/dev/null
     show; adb shell "umount $W" >/dev/null 2>&1 || true; exit 0
 fi
-D=${1:?usage: gd-kit-push.sh DIR | --show}
+D=${1:?usage: gd-kit-push.sh DIR [--flag NAME | --no-flag NAME]... | --show}
+# T71 (docs/WIN11-GPU.md 6.100): --flag NAME creates C:\ProgramData\Starbite\NAME (e.g. glzcflipd: the game presents
+# zero-copy on a FLIP_DISCARD swap chain; needs an sbumd with 0167), --no-flag NAME removes it. Several may be given.
+shift
+flags_on=(); flags_off=()
+while [ $# -gt 0 ]; do case $1 in --flag) flags_on+=("$2"); shift 2;; --no-flag) flags_off+=("$2"); shift 2;; *) echo "unknown argument $1"; exit 1;; esac; done
+for f in "${flags_on[@]:-}" "${flags_off[@]:-}"; do case $f in ''|[a-z0-9]*) ;; *) echo "bad flag name $f"; exit 1;; esac; case $f in */*|*..*) echo "bad flag name $f"; exit 1;; esac; done
 for f in opengl32-gd.dll libgallium_wgl-gd.dll; do [ -f "$D/$f" ] || { echo "no $D/$f"; exit 1; }; done
 adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null
 trap 'adb shell "sync; umount '"$W"'" >/dev/null 2>&1 || true' EXIT
@@ -36,4 +42,8 @@ push() {
 push "$D/opengl32-gd.dll" "$G/opengl32.dll"
 push "$D/libgallium_wgl-gd.dll" "$G/libgallium_wgl.dll"
 adb shell "echo starbite > \"$G/opengl32.dll.starbite\""
+P="$W/ProgramData/Starbite"
+for f in "${flags_on[@]:-}"; do [ -n "$f" ] || continue; adb shell "mkdir -p '$P' && echo on > '$P/$f'"; echo "flag on: C:\\ProgramData\\Starbite\\$f"; done
+for f in "${flags_off[@]:-}"; do [ -n "$f" ] || continue; adb shell "rm -f '$P/$f'"; echo "flag off: C:\\ProgramData\\Starbite\\$f"; done
+adb shell "ls '$P' 2>/dev/null | grep -E '^gl' | tr '\n' ' '" | tr -d '\r' | sed 's/^/gl flag files now: /'; echo
 echo "done; phone in TWRP"

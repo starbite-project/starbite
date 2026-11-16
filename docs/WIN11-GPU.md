@@ -2996,6 +2996,37 @@ two minutes. **74 pass, 17 fail, 20 crash, 0 time out.**
   today. T76 runs the same suite on the next tree with the old and the new shader translator
   (`tools/win/winetests/wt-compare.py` puts the logs side by side).
 
+### 6.100 T71 read: the flip model works for every window kind; Geometry Dash shows 60 on it (GDI: 32-41)
+
+(2026-11-16 02:10) **T71** (`build/win/results-t71`, big cores, sbumd d39b83ab = 0167, no flag files for part 1):
+- **FLIP2, one DWM process (pid 1108) for the whole boot:** hwnd (FLIP_SEQUENTIAL) 60.2 fps, hwndblt (DISCARD)
+  52.8, **dcsc (DirectComposition swap chain) 61.3, dcsurf (DirectComposition surface) 55.5**, 0 failures each.
+  With the user's sbumd none of the four was composed (T56-T60); with 0159 alone the flip kinds killed DWM (T66).
+- **Geometry Dash, Stereo Madness, ~5 min each** (GD ICD 0164, ARM64EC):
+
+| run | present | fps | hitches |
+|---|---|---|---|
+| A | async GDI (the user's mode) | 41.2 avg, 1 % low 22.2, 0.1 % low 8.3 | 24 over 100 ms, 14 over 250 ms |
+| B | zero-copy, FLIP_SEQUENTIAL, interval 0 | 55.4 median of 300-frame windows (max 58.7) | 26 over 100 ms, worst 1.4 s (one) |
+| B2 | zero-copy, FLIP_DISCARD, interval 0 | 54.9 median (max 57.5) | 1 over 100 ms, worst 152 ms |
+| A2 | async GDI | 36.4 avg, 1 % low 18.5, 0.1 % low 7.9 | 20 over 100 ms, 13 over 250 ms |
+
+  - **The game's own counter in the shots: 60 on the flip path, 32 on GDI.** 60 is Geometry Dash's cap, so the
+    present path is no longer what limits it; the 300-frame windows average ~55 because they include level
+    restarts.
+  - Per frame on the flip path: GL wait 5.6-5.9 ms, copy 0.5 ms, **Present 0.6-0.7 ms** (blt model in T68/T69:
+    25-30 ms), WAR wait 1.5-1.9 ms; 0 present failures; the game is on screen in DWM's frame.
+  - C: fell to 232 MiB free by the fourth run (pagefile growth), as in T68.
+- **Candidate for the user** (their yes needed): `build/win/stage/sbwddm-user-0167` (T61 kernel drivers + sbumd
+  d39b83ab) and `build/win/gd-kit-ec-0164` with the flag file `glzcflipd` (FLIP_DISCARD: fewest hitches here);
+  `gd-kit-push.sh DIR --flag NAME / --no-flag NAME` sets it from TWRP. INSTALL.md there has the install and the
+  way back. What it changes besides the game: every D3D window is now presented through DWM properly (blt, flip,
+  DirectComposition), which is what Edge/WebView2 and WinUI apps need; that part has run in four test boots
+  (T68-T71) but not in a user session.
+- **Next for speed:** the 5.6 ms GL wait and 1.5 ms WAR wait sit on the game thread; with the game's cap raised
+  they are what bounds it (~8 ms of waits + the game's own time). A present thread, as the GDI path has, moves
+  them off it.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
