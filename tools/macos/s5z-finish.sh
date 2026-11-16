@@ -21,14 +21,16 @@ for f in "$K"/obj/*.o "$K"/obj/*.cpo; do
 	[ "$n" = 1 ] || { echo "not linked from obj: $(basename "$f")"; exit 1; }
 done
 (cd "$K" && ./link3.sh "$K/seq2f.filelist" "$K/seq2f.noctf" 2>&1 | grep -v libTightbeam || true)
+# (to a file first: grep -q closing the pipe early fails the pipeline under pipefail)
+strings -a "$K/seq2f.noctf" > "$K/seq2f.strings"
 for s in 'STARLTE GPU: buffer cache' 'STARLTE GPU CACHE' 'SWEET PROF: sampling' 'SWEET KBD: not the swipe' 'three-finger swipe up'; do
-	strings -a "$K/seq2f.noctf" | grep -q "$s" || { echo "seq2f lacks \"$s\""; exit 1; }
+	grep -q "$s" "$K/seq2f.strings" || { echo "seq2f lacks \"$s\""; exit 1; }
 done
 cp "$K/seq2f.noctf" out/kernel.development.starlte-12377-seq2f
 export KERNEL=out/kernel.development.starlte-12377-seq2f ADT=tools/macos/adt/starlte-mac-j313-sip-native.adt
 for n in s5z s5zg s5zauto s5zday; do
 	bash tools/mkpayload-ios26.sh macos15-$n tools/cmdline/macos15-$n.txt | tail -1
-	strings -a out/xnu-macos15-$n.xnu | grep -q 'STARLTE GPU CACHE' || { echo "payload $n lacks the cache"; exit 1; }
+	[ "$(strings -a out/xnu-macos15-$n.xnu | grep -c 'STARLTE GPU CACHE')" -ge 1 ] || { echo "payload $n lacks the cache"; exit 1; }
 done
 shasum -a 256 out/kernel.development.starlte-12377-seq2f out/xnu-macos15-s5z.xnu out/xnu-macos15-s5zg.xnu out/xnu-macos15-s5zauto.xnu out/xnu-macos15-s5zday.xnu
 ls -l out/xnu-macos15-s5z*.xnu | awk '{print $5, $NF}'
