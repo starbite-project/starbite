@@ -16,7 +16,9 @@
  * off as VDDAF, VDDD, VDDA, VDDIO, BUCK2, always with the reset low, MCLK off and the bus pins off; the probe at levels
  * 0 (no write, no I2C write), 1 and 2; a failure injected at each step ends in FAIL with everything as found; an abort
  * at every point of the start-up leaves everything as found. Exit status 0 = all passed. */
+#include <math.h>
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -656,6 +658,12 @@ static int near(unsigned a, unsigned b, unsigned tol)
     return a + tol >= b && b + tol >= a;
 }
 
+/* a stand-in for kern_next.c's band workers: the bands in a scrambled order */
+static void fake_par(void (*fn)(void *, int), void *arg, int n)
+{
+    for (int i = n - 1; i >= 0; i -= 2) fn(arg, i);
+    for (int i = n - 2; i >= 0; i -= 2) fn(arg, i);
+}
 static void test_isp(void)
 {
     const unsigned W = 1632, H = 1224;
@@ -755,6 +763,123 @@ static void test_isp(void)
                       p & 0xFFFFFF, t[i].corner);
             }
         }
+    }
+
+    /* ---- v2 (Face Unlock round 2): the same orientation as v1 for every xform, a flat field, white balance from the
+     * near-grey pixels, the ROI's statistics, the noise against v1, the time ---- */
+    {
+        struct cam_raw r = { (const uint8_t *)raw, W, H, W * 2, CAM_RAW16, CAM_BAYER_GRBG, 64 };   /* (the red patch) */
+        struct cam_wb one = { 256, 256, 256 };
+        struct cam_tune tu;
+        cam_tune_default(&tu);
+        for (unsigned xf = 0; xf < 8; ++xf) {
+            unsigned ow = (xf & 1) ? 240 : 320, oh = (xf & 1) ? 320 : 240;
+            struct cam_out o1 = { out, ow, oh, ow, xf }, o2 = { out2, ow, oh, ow, xf };
+            cam_isp_render(&r, &one, &o1, 0, oh);
+            cam_isp_process(&r, &one, &tu, &o2, 0, 0, cam_isp_rows(&o2), 0);
+            unsigned bad = 0;
+            for (unsigned y = 4; y < oh; y += 8)
+                for (unsigned x = 4; x < ow; x += 8) {
+                    int r1 = ((out[y * ow + x] >> 16) & 0xFF) > 128, r2 = ((out2[y * ow + x] >> 16) & 0xFF) > 128;
+                    /* away from the patch's edge (the area resample blends one pixel there) */
+                    int edge = 0;
+                    for (int dy = -2; dy <= 2 && !edge; dy += 4)
+                        for (int dx = -2; dx <= 2 && !edge; dx += 4) {
+                            int yy = (int)y + dy, xx = (int)x + dx;
+                            if (yy >= 0 && xx >= 0 && yy < (int)oh && xx < (int)ow &&
+                                (((out[yy * ow + xx] >> 16) & 0xFF) > 128) != r1)
+                                edge = 1;
+                        }
+                    bad += !edge && r1 != r2;
+                }
+            CHECK(bad == 0, "v2 xform %u: the red patch differs from v1 at %u points", xf, bad);
+        }
+        /* a flat grey field: flat out without lens shading; the corners 1.4x brighter (linear) with the default */
+        for (size_t i = 0; i < (size_t)W * H; ++i)
+            raw[i] = 64 + 300;
+        struct cam_out o = { out, 360, 480, 360, CAM_ROT270 };
+        tu.lsc_corner = 256;
+        struct cam_pstats ps;
+        memset(&ps, 0, sizeof ps);
+        cam_isp_process(&r, &one, &tu, &o, 0, 0, cam_isp_rows(&o), &ps);
+        unsigned lo = 255, hi = 0;
+        for (size_t i = 0; i < 360u * 480u; ++i) {
+            unsigned g = (out[i] >> 8) & 0xFF;
+            lo = g < lo ? g : lo, hi = g > hi ? g : hi;
+        }
+        CHECK(hi - lo <= 1 && ps.n == 360u * 480u, "v2 flat field: green %u..%u over %u pixels", lo, hi, ps.n);
+        uint32_t ymean = (uint32_t)(ps.ysum / ps.n);
+        CHECK(near(ymean, 300u * 4095u / 959u, 8), "v2 flat field: luma %u (12-bit; %u expected)", ymean, 300u * 4095u / 959u);
+        cam_tune_default(&tu);
+        cam_isp_process(&r, &one, &tu, &o, 0, 0, cam_isp_rows(&o), 0);
+        unsigned mid = (out[240 * 360 + 180] >> 8) & 0xFF, corner = (out[2 * 360 + 2] >> 8) & 0xFF;
+        CHECK(corner > mid + 15, "v2 lens shading: the corner %u brighter than the middle %u", corner, mid);
+        /* a cast: red at half; the near-grey white balance finds 2x (a grey field is all near grey once balanced) */
+        for (size_t y = 0; y < H; ++y)
+            for (size_t x = 0; x < W; ++x)
+                raw[y * W + x] = (uint16_t)(64 + ((!(y & 1) && (x & 1)) ? 200 : 400));   /* GRBG: R at (odd x, even y) */
+        struct cam_wb wb2 = { 512, 256, 256 };
+        memset(&ps, 0, sizeof ps);
+        cam_isp_process(&r, &wb2, &tu, &o, 0, 0, cam_isp_rows(&o), &ps);
+        CHECK(ps.gn > ps.n / 2 && near((unsigned)(ps.gsum[1] * 256 / ps.gsum[0]), 512, 30),
+              "v2 near grey: %u of %u pixels, G/R %u (512 expected)", ps.gn, ps.n,
+              ps.gn ? (unsigned)(ps.gsum[1] * 256 / ps.gsum[0]) : 0);
+        /* the ROI: a box in the output's pixels gathers only its own luma */
+        for (size_t i = 0; i < (size_t)W * H; ++i)
+            raw[i] = 64 + 100;
+        for (size_t y = 0; y < H / 2; ++y)                  /* the sensor's top half brighter */
+            for (size_t x = 0; x < W; ++x)
+                raw[y * W + x] = 64 + 800;
+        tu.lsc_corner = 256;
+        struct cam_roi roi = { 1, 0, 0, 100, 100 };         /* ROT270: the output's top-left = the sensor's top-right */
+        memset(&ps, 0, sizeof ps);
+        cam_isp_process(&r, &one, &tu, &o, &roi, 0, cam_isp_rows(&o), &ps);
+        CHECK(ps.rn == 100u * 100u && near((unsigned)(ps.rsum / ps.rn), 800u * 4095u / 959u, 60),
+              "v2 ROI: %u pixels, luma %u (the bright half expected)", ps.rn, ps.rn ? (unsigned)(ps.rsum / ps.rn) : 0);
+        /* noise: a grey field with +-40 noise; v2's averaging must leave less of it than v1's one cell a pixel */
+        unsigned seed = 1;
+        for (size_t i = 0; i < (size_t)W * H; ++i) {
+            seed = seed * 1103515245u + 12345u;
+            raw[i] = (uint16_t)(64 + 300 + (int)((seed >> 16) % 81) - 40);
+        }
+        struct cam_out o1 = { out2, 360, 480, 360, CAM_ROT270 };
+        cam_isp_render(&r, &one, &o1, 0, 480);
+        /* (the same tone and no colour matrix: the averaging alone; the matrix and the S curve add contrast) */
+        tu.lsc_corner = 256, tu.tone = 0;
+        for (int k = 0; k < 9; ++k) tu.ccm[k] = (int16_t)(k % 4 == 0 ? 1024 : 0);
+        cam_isp_process(&r, &one, &tu, &o, 0, 0, cam_isp_rows(&o), 0);
+        double v1s = 0, v2s = 0, m1 = 0, m2 = 0;
+        for (size_t i = 0; i < 360u * 480u; ++i) m1 += (out2[i] >> 8) & 0xFF, m2 += (out[i] >> 8) & 0xFF;
+        m1 /= 360.0 * 480, m2 /= 360.0 * 480;
+        for (size_t i = 0; i < 360u * 480u; ++i) {
+            double a = ((out2[i] >> 8) & 0xFF) - m1, b = ((out[i] >> 8) & 0xFF) - m2;
+            v1s += a * a, v2s += b * b;
+        }
+        v1s = sqrt(v1s / (360.0 * 480)), v2s = sqrt(v2s / (360.0 * 480));
+        CHECK(v2s * 1.4 < v1s, "v2 noise: sd %.2f against v1's %.2f (8-bit green)", v2s, v1s);
+        /* four bands (the band workers) give the very same picture and statistics as one */
+        {
+            struct cam_pstats p1, p4;
+            cam_tune_default(&tu);
+            memset(&p1, 0, sizeof p1);
+            memset(&p4, 0, sizeof p4);
+            cam_isp_set_par(0);
+            struct cam_out oa = { out, 360, 480, 360, CAM_ROT270 | CAM_MIRROR }, ob = { out2, 360, 480, 360, CAM_ROT270 | CAM_MIRROR };
+            struct cam_roi rr = { 1, 50, 60, 120, 140 };
+            struct cam_wb w3 = { 300, 256, 420 };
+            cam_isp_process(&r, &w3, &tu, &oa, &rr, 0, cam_isp_rows(&oa), &p1);
+            cam_isp_set_par(fake_par);
+            cam_isp_process(&r, &w3, &tu, &ob, &rr, 0, cam_isp_rows(&ob), &p4);
+            cam_isp_set_par(0);
+            CHECK(!memcmp(out, out2, 360u * 480u * 4u) && !memcmp(&p1, &p4, sizeof p1),
+                  "v2 in four bands: the same picture and statistics as one band");
+        }
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (int k = 0; k < 10; ++k) cam_isp_process(&r, &one, &tu, &o, 0, 0, cam_isp_rows(&o), &ps);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double ms = ((t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6) / 10;
+        printf("cam-test: v2 360 x 480 from 1632 x 1224: %.2f ms a frame on this host (cached memory)\n", ms);
     }
 
     /* BMP */

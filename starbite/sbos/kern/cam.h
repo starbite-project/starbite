@@ -99,6 +99,17 @@ int cam_state(void);                       /* CAM_ST_* */
 uint32_t cam_fps_x10(void);                /* frames a second x 10 over the last ~2 s of the stream */
 uint32_t cam_model_id(void);               /* the sensor's model ID as read (0: not read) */
 int cam_flash_available(void);             /* 0: the front camera has no LED (use a white screen); see CAMERA.md */
+/* Face Unlock round 2: the pipeline (v2 by default; 1 = v1), auto-exposure metered on a region (the face; valid for
+ * about 0.5 s after each call), the exposure's state, a crop of the newest raw frame (RAW10 in 16 bits, Bayer GRBG,
+ * x0 / y0 even): 0 copied, < 0 none yet */
+struct cam_roi { int valid; unsigned x, y, w, h; };   /* in the OUTPUT's pixels (after the rotation) */
+void cam_set_pipeline(int v);
+void cam_set_roi(const struct cam_roi *roi);
+struct cam_ae_info { uint32_t lines, again, dgain; uint32_t luma; int settled; uint32_t wb_r, wb_b; uint32_t frames; };
+void cam_ae_info(struct cam_ae_info *i);
+int cam_raw_crop(uint16_t *dst, unsigned x0, unsigned y0, unsigned w, unsigned h);
+/* render the newest raw frame again with the other pipeline (v1 if 1, else v2) into px (the preview's size): 0 / < 0 */
+int cam_render_again(uint32_t *px, int v1);
 
 #define CAM_ST_OFF      0
 #define CAM_ST_STARTING 1                  /* powering up, ID, the ISP side, the mode */
@@ -160,6 +171,38 @@ void cam_isp_wb_grey(const struct cam_stats *s, unsigned black, struct cam_wb *w
  * scaled to the output's size after the rotation (nearest), black level off, white balance, a gamma of 2 (square
  * root), clipped to 8 bits */
 void cam_isp_render(const struct cam_raw *r, const struct cam_wb *wb, const struct cam_out *o, unsigned y0, unsigned y1);
+/* ---- the pipeline v2 (cam_isp.c, Face Unlock round 2, 2026-11-16: "like an old Nokia" on 9i) --------------------
+ * One pass over the frame in the sensor's own order (each raw row pair read once, in bulk: the frames' memory is
+ * uncached), every cell averaged into the output (an area resample: no aliasing, ~1.7 x 1.7 cells a pixel at
+ * 360 x 480, the noise down by about that), then per pixel: lens shading (a radial gain), white balance, a colour
+ * matrix, an sRGB-like tone curve with a mild S; the rotated output written in tiles of 8. It also measures the frame
+ * for AE / AWB (struct cam_pstats). cam_isp_render (v1: one cell a pixel, gamma 2) stays for the tests and as v1. */
+struct cam_tune {
+    int16_t ccm[9];                         /* rows R, G, B; Q10 (1024 = 1x); each row sums to 1024 */
+    uint16_t lsc_corner;                    /* the gain at the frame's corners, Q8 (256: none); radial, r^2 */
+    uint8_t tone;                           /* 0: v1's gamma 2.0; 1: sRGB with a mild S */
+    uint8_t rsv;
+};
+struct cam_pstats {                         /* linear, black off, after lens shading, BEFORE white balance; 0..4095 */
+    uint32_t n;                             /* pixels */
+    uint64_t sum[3];                        /* R, G, B over every pixel */
+    uint64_t gsum[3];                       /* over the near-grey ones (with the white balance used: within 25 %) */
+    uint32_t gn;
+    uint32_t clip;                          /* pixels with a channel at >= 95 % of white */
+    uint64_t ysum, csum, rsum;              /* luma (0.25 R + 0.5 G + 0.25 B): all, the middle third, the ROI */
+    uint32_t cn, rn;
+    uint32_t hist[16];                      /* luma in 16 bins of 256 */
+};
+void cam_tune_default(struct cam_tune *t);
+/* rows [y0, y1) of the UNROTATED output (the sensor's order: 0 .. the out's height before the rotation) into o
+ * (rotated and mirrored as o->xform says); y0 and y1 are multiples of 8 except at the end. st (may be 0) gathers
+ * over those rows (zero it before the first call of a frame). Linear 12-bit internally (white = 4095). */
+void cam_isp_process(const struct cam_raw *r, const struct cam_wb *wb, const struct cam_tune *t, const struct cam_out *o,
+                     const struct cam_roi *roi, unsigned y0, unsigned y1, struct cam_pstats *st);
+unsigned cam_isp_rows(const struct cam_out *o);   /* the unrotated output's height (what y0 / y1 run over) */
+/* the other cores for v2 (kern_next.c's band workers: rows in 4 bands); 0: one core. 9i's phone: 77 ms on one A55 */
+void cam_isp_set_par(void (*par)(void (*fn)(void *arg, int i), void *arg, int n));
+
 /* the BMP file of an XRGB picture: its length, or 0 if cap is too small */
 uint32_t cam_isp_bmp(const uint32_t *px, unsigned w, unsigned h, unsigned stride, uint8_t *dst, uint32_t cap);
 uint32_t cam_isp_bmp_size(unsigned w, unsigned h);

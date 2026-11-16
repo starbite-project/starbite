@@ -640,6 +640,10 @@ static struct {
     int have_pic, last_slot;
     struct cam_wb wb;
     struct cam_stats last;
+    struct cam_pstats ps;                   /* v2: the last frame's measures */
+    uint32_t luma, aim;                     /* v2: the metered luma (12-bit linear) and its aim */
+    unsigned settled;                       /* v2: frames in a row within 20 % of the aim (or at a range end) */
+    uint32_t isp_us, isp_max, isp_n;        /* the preview's processing time over the streaming line's 2 s */
     /* the still */
     int still;                              /* 0 none, 1 asked, 2 rendering, 3 ready */
     unsigned still_row, sw, sh;
@@ -1204,6 +1208,132 @@ static void ae_step(const struct cam_stats *s)
     C.ae_wait = 2;
 }
 
+/* ---- v2 (Face Unlock round 2): the pipeline, the metering, white balance from the near-grey pixels ---------------- */
+static int v2_off;                          /* cam_set_pipeline(1): v1 */
+static struct cam_tune v2_tune;
+static int v2_tune_set;
+static struct cam_roi v2_roi;
+static uint64_t v2_roi_t;
+static const struct cam_tune *tune(void)
+{
+    if (!v2_tune_set)
+        cam_tune_default(&v2_tune), v2_tune_set = 1;
+    return &v2_tune;
+}
+void cam_set_pipeline(int v) { v2_off = v == 1; }
+void cam_set_roi(const struct cam_roi *roi)
+{
+    if (roi && roi->valid)
+        v2_roi = *roi, v2_roi_t = now_us();
+    else
+        v2_roi.valid = 0;
+}
+static const struct cam_roi *roi_now(void)
+{
+    return v2_roi.valid && now_us() - v2_roi_t < 600000U ? &v2_roi : 0;
+}
+/* white balance: the near-grey pixels' grey world when there are enough of them (>= 2 %), else every pixel's; the
+ * gains within 0.5x..4x and moved a quarter of the way a frame */
+static void wb_v2(const struct cam_pstats *p, int first)
+{
+    const uint64_t *sm = p->gn * 50U >= p->n && p->gn ? p->gsum : p->sum;
+    uint32_t r = 256U, b = 256U;
+    if (sm[0] > 0 && sm[1] > 0 && sm[2] > 0) {
+        uint64_t kr = sm[1] * 256U / sm[0], kb = sm[1] * 256U / sm[2];
+        r = (uint32_t)(kr < 128U ? 128U : kr > 1024U ? 1024U : kr);
+        b = (uint32_t)(kb < 128U ? 128U : kb > 1024U ? 1024U : kb);
+    }
+    if (first)
+        C.wb.r = r, C.wb.b = b;
+    else
+        C.wb.r = (3U * C.wb.r + r) / 4U, C.wb.b = (3U * C.wb.b + b) / 4U;
+    C.wb.g = 256U;
+}
+/* the exposure towards the aim: the face's luma at 24 % when the ROI is set (a face was found), else the frame's mean
+ * and its middle third's, at 16 %; clipping pulls it down; a whole step when far off, else half a step */
+static void ae_v2(const struct cam_pstats *p)
+{
+    const struct cam_roi *roi = roi_now();
+    uint32_t m, aim;
+    if (roi && p->rn) {
+        m = (uint32_t)(p->rsum / p->rn);
+        aim = 983U;                                                     /* 0.24 x 4095 */
+    } else {
+        uint32_t all = p->n ? (uint32_t)(p->ysum / p->n) : 0, mid = p->cn ? (uint32_t)(p->csum / p->cn) : all;
+        m = (all + mid) / 2U;
+        aim = 655U;                                                     /* 0.16 x 4095 */
+    }
+    C.luma = m, C.aim = aim;
+    if (!C.req.ae || C.ae_wait) {
+        if (C.ae_wait)
+            C.ae_wait--;
+        return;
+    }
+    m = m ? m : 1U;
+    int clipped = !roi && p->clip * 100U > 3U * p->n && m > aim / 2U;
+    if (!clipped && m * 100U >= aim * 80U && m * 100U <= aim * 120U) {
+        C.settled++;
+        return;
+    }
+    uint64_t now = (uint64_t)C.lines * C.again * C.dgain / 32U, want;   /* lines at 1x, x 256 */
+    want = clipped ? now * 7U / 10U : now * aim / m;
+    if (want > now * 8U)
+        want = now * 8U;
+    if (want < now / 8U)
+        want = now / 8U;
+    if (!(want > now * 2U || want * 2U < now))
+        want = (want + now) / 2U;                                       /* near: half a step (no hunting) */
+    uint32_t l = (uint32_t)(want / 256U > EXP_MAX ? EXP_MAX : want / 256U);
+    l = l < 2U ? 2U : l;
+    uint64_t gl = want * 32U / l;
+    uint32_t a = (uint32_t)(gl / 256U), d;
+    a = a < 0x20U ? 0x20U : a > 0x200U ? 0x200U : a;
+    d = (uint32_t)(want * 32U / ((uint64_t)l * a));
+    d = d < 0x100U ? 0x100U : d > 0x400U ? 0x400U : d;
+    if (l == C.lines && a == C.again && d == C.dgain) {
+        C.settled++;                                                    /* at an end of the range: as good as it gets */
+        return;
+    }
+    C.settled = 0;
+    (void)exposure_put(l, a, d);
+    C.ae_wait = 2;
+}
+void cam_ae_info(struct cam_ae_info *i)
+{
+    i->lines = C.lines, i->again = C.again, i->dgain = C.dgain;
+    i->luma = C.luma, i->settled = C.settled >= 2U, i->wb_r = C.wb.r, i->wb_b = C.wb.b, i->frames = C.frames;
+}
+/* the newest frame's raw pixels (copied within the poll's turn: the slot is armed again for the WDMA, ~4 frames) */
+int cam_raw_crop(uint16_t *dst, unsigned x0, unsigned y0, unsigned w, unsigned h)
+{
+    if (C.phase != PH_RUN || C.last_slot < 0 || !C.frames || (x0 | y0) & 1U || x0 + w > CAM_FRAME_W || y0 + h > CAM_FRAME_H)
+        return CAM_ESTATE;
+    volatile uint8_t *m = slot_mem((unsigned)C.last_slot);
+    for (unsigned y = 0; y < h; ++y) {
+        const volatile uint32_t *s = (const volatile uint32_t *)(m + (size_t)(y0 + y) * CAM_LINE_BYTES) + x0 / 2U;
+        for (unsigned x = 0; x < w; x += 2U) {
+            uint32_t v = s[x / 2U];
+            dst[(size_t)y * w + x] = (uint16_t)v;
+            if (x + 1U < w)
+                dst[(size_t)y * w + x + 1U] = (uint16_t)(v >> 16);
+        }
+    }
+    return 0;
+}
+int cam_render_again(uint32_t *px, int v1)
+{
+    if (C.phase != PH_RUN || C.last_slot < 0 || !C.frames || !px)
+        return CAM_ESTATE;
+    struct cam_raw r;
+    raw_of((unsigned)C.last_slot, &r);
+    struct cam_out o = { px, C.req.w, C.req.h, C.req.w, C.req.xform };
+    if (v1)
+        cam_isp_render(&r, &C.wb, &o, 0, C.req.h);
+    else
+        cam_isp_process(&r, &C.wb, tune(), &o, 0, 0, cam_isp_rows(&o), 0);
+    return 0;
+}
+
 static void hold_slot(unsigned k)
 {
     slot_arm(CAM_RING);
@@ -1270,10 +1400,14 @@ static void still_work(void)
     struct cam_raw r;
     raw_of(C.held, &r);
     struct cam_out o = { (uint32_t *)(uintptr_t)(C.mem + CAM_STILLPX_OFF), C.sw, C.sh, C.sw, C.req.xform & 3U };
-    unsigned y1 = C.still_row + 102U;
-    cam_isp_render(&r, &C.wb, &o, C.still_row, y1);
+    unsigned rows = v2_off ? C.sh : cam_isp_rows(&o);
+    unsigned y1 = C.still_row + (v2_off ? 102U : 64U);
+    if (v2_off)
+        cam_isp_render(&r, &C.wb, &o, C.still_row, y1);
+    else
+        cam_isp_process(&r, &C.wb, tune(), &o, 0, C.still_row, y1, 0);
     C.still_row = y1;
-    if (C.still_row < C.sh)
+    if (C.still_row < rows)
         return;
     C.bmp_len = cam_isp_bmp(o.px, C.sw, C.sh, C.sw, (uint8_t *)(uintptr_t)(C.mem + CAM_BMP_OFF), CAM_PIC_BYTES);
     release_slot();
@@ -1310,19 +1444,24 @@ static void run_poll(void)
     if (t - C.t_fps >= 2000000U) {
         C.fps10 = (uint32_t)((uint64_t)C.fps_frames * 10000000U / (t - C.t_fps));
         C.t_fps = t, C.fps_frames = 0;
-        say("streaming: %u.%u frames a second, %u frames, exposure %u lines gain 0x%x digital 0x%x, %u DMA errors",
-            C.fps10 / 10U, C.fps10 % 10U, C.frames, C.lines, C.again, C.dgain, C.dma_err);
+        say("streaming: %u.%u frames a second, %u frames, exposure %u lines gain 0x%x digital 0x%x, %u DMA errors; "
+            "pipeline v%u %u ms (max %u); luma %u aim %u; wb r %u b %u",
+            C.fps10 / 10U, C.fps10 % 10U, C.frames, C.lines, C.again, C.dgain, C.dma_err, v2_off ? 1U : 2U,
+            C.isp_n ? C.isp_us / C.isp_n / 1000U : 0, C.isp_max / 1000U, C.luma, C.aim, C.wb.r, C.wb.b);
+        C.isp_us = C.isp_max = C.isp_n = 0;
     }
     struct cam_raw r;
     struct cam_stats s;
     raw_of((unsigned)k, &r);
     cam_isp_stats(&r, 16, &s);
-    struct cam_wb w;
-    cam_isp_wb_grey(&s, CAM_BLACK, &w);
-    if (C.frames == 1)
-        C.wb = w;
-    else
-        C.wb.r = (3U * C.wb.r + w.r) / 4U, C.wb.b = (3U * C.wb.b + w.b) / 4U, C.wb.g = 256U;
+    if (v2_off) {
+        struct cam_wb w;
+        cam_isp_wb_grey(&s, CAM_BLACK, &w);
+        if (C.frames == 1)
+            C.wb = w;
+        else
+            C.wb.r = (3U * C.wb.r + w.r) / 4U, C.wb.b = (3U * C.wb.b + w.b) / 4U, C.wb.g = 256U;
+    }
     C.last = s;
     C.last_slot = k;
     if (C.still == 1 && C.frames > 3U) {
@@ -1333,12 +1472,29 @@ static void run_poll(void)
         say("still: frame %u held (slot %d), rendering %u x %u", C.frames, k, C.sw, C.sh);
     } else {
         struct cam_out o = { (uint32_t *)(uintptr_t)(C.mem + CAM_PREVIEW_OFF), C.req.w, C.req.h, C.req.w, C.req.xform };
-        cam_isp_render(&r, &C.wb, &o, 0, C.req.h);
+        uint64_t ti = now_us();
+        if (v2_off) {
+            cam_isp_render(&r, &C.wb, &o, 0, C.req.h);
+        } else {
+            struct cam_pstats p;
+            for (unsigned i = 0; i < sizeof p; ++i)
+                ((uint8_t *)&p)[i] = 0;
+            cam_isp_process(&r, &C.wb, tune(), &o, roi_now(), 0, cam_isp_rows(&o), &p);
+            C.ps = p;
+            wb_v2(&p, C.frames == 1);
+        }
+        uint32_t dt = (uint32_t)(now_us() - ti);
+        C.isp_us += dt, C.isp_n++;
+        if (dt > C.isp_max)
+            C.isp_max = dt;
         C.seq++;
         C.have_pic = 1;
         slot_arm((unsigned)k);
     }
-    ae_step(&s);
+    if (v2_off)
+        ae_step(&s);
+    else if (C.ps.n)
+        ae_v2(&C.ps);
 }
 
 /* ---- the steps ---------------------------------------------------------------------------------------------------- */

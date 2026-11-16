@@ -763,6 +763,7 @@ int kphotos_delete(int i);          /* 0, -1 (why) */
 const char *kphotos_why(void);
 void kphotos_fit(int w, int h, int *sw, int *sh);   /* the size a w x h picture is kept at */
 void kphotos_dry(int on);           /* the host test: every write a dry run (the self test always is) */
+void kphotos_entry(const char *name);   /* Face Unlock's test: another entry of the same format (0: the photos) */
 void kphotos_reset(void);           /* forget the headers read (the host test's restart) */
 /* settings that last across a restart (settings.c) */
 void settings_restore(void);

@@ -25,10 +25,13 @@
 #define FACE_NTPL 5                     /* the enrolment's poses: centre, left, right, up, down */
 #define FACE_FRAME_W 360U               /* the camera's preview for Face Unlock: portrait, not mirrored */
 #define FACE_FRAME_H 480U
-#define FACE_DET_SCALE 3U
+#define FACE_DET_SCALE 3U               /* detection on a 120 x 160 copy (padded to 128 x 160) */
 /* face size = eye distance / frame width. The S9's front camera (~80 degrees wide): ~0.12 at 30 cm, ~0.09 at 40 cm */
 #define FACE_MIN_SIZE 0.06f             /* smaller: not embedded (the 112 x 112 crop would be mostly upscaled) */
-#define FACE_CLOSER_SIZE 0.07f          /* smaller: the "Move a little closer" hint */               /* detection on a 120 x 160 copy (padded to 128 x 160) */
+#define FACE_CLOSER_SIZE 0.07f          /* smaller: the "Move a little closer" hint */
+/* the face box's mean grey below which no embedding is made, in scans AND set-up alike (9i: scans wanted >= 20 and
+ * set-up nothing; in a dim room v1's dark picture gave faces at < 20: "detections 24, embeddings 0", never a match) */
+#define FACE_MIN_BRIGHT 8.0f
 
 enum { FACE_SPEED = 0, FACE_SECURITY = 1 };
 
@@ -139,9 +142,13 @@ int face_scan_live(const struct face_scan *s);              /* Security's livene
 
 /* ---- enrolment --------------------------------------------------------------------------------------------- */
 enum { FB_CENTRE = 0, FB_LEFT, FB_RIGHT, FB_UP, FB_DOWN };
+#define FACE_ENROL_CENTRE_N 3           /* round 2: embeddings averaged into the centre's template (others: 2) */
+#define FACE_ENROL_POSE_N 2
 struct face_enrol {
-    int have;                           /* bit per pose */
-    float q[FACE_NTPL];                 /* each pose's kept quality */
+    int have;                           /* bit per pose with its embeddings all in */
+    float q[FACE_NTPL];                 /* (unused since round 2) */
+    float acc[FACE_NTPL][FACE_DIM];     /* each pose's embeddings summed (the template is their normalised mean) */
+    int cnt[FACE_NTPL];
     float pitch0, yaw0;                 /* the centre pose's pitch and yaw (the others are relative to them) */
     int centre_n;
     float eye_sum;
@@ -151,11 +158,12 @@ struct face_enrol {
     float pend_pitch, pend_yaw, pend_q, pend_eye;   /* that detection's signals */
 };
 void face_enrol_begin(struct face_enrol *en);
-/* a detection: the pose it fills (FB_*) when it is a better one than kept (then embed it), else -1 */
+/* a detection: the pose it adds to (FB_*: then embed it) while that pose wants more embeddings, else -1 */
 int face_enrol_det(struct face_enrol *en, const struct face_sig *g, float score);
 /* its embedding: 1 kept, 0 refused (not the same person as the centre pose: < 0.5) */
 int face_enrol_emb(struct face_enrol *en, const float *emb);
 int face_enrol_done(const struct face_enrol *en);           /* every pose */
 int face_enrol_count(const struct face_enrol *en);
+int face_enrol_seen(const struct face_enrol *en);      /* bit per pose with at least one embedding */
 
 #endif

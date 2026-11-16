@@ -149,6 +149,17 @@ static const uint32_t *scene_person(uint64_t t, unsigned *seq)
     if (pose < 0) return TURN[(t / 400) % 2]->frame;
     return cur->frame;
 }
+static float dim = 1;                               /* the scene's brightness (the 9i dark-room case) */
+static const uint32_t *scene_dim(uint64_t t, unsigned *seq)
+{
+    const uint32_t *f = scene_person(t, seq);
+    static uint32_t d[FACE_FRAME_W * FACE_FRAME_H];
+    for (size_t i = 0; i < (size_t)FACE_FRAME_W * FACE_FRAME_H; i++) {
+        uint32_t v = f[i];
+        d[i] = 0xFF000000u | (uint32_t)((v >> 16 & 255) * dim) << 16 | (uint32_t)((v >> 8 & 255) * dim) << 8 | (uint32_t)((v & 255) * dim);
+    }
+    return d;
+}
 static const uint32_t *scene_empty(uint64_t t, unsigned *seq)
 {
     *seq = (unsigned)(t / 33) + 1;
@@ -297,6 +308,15 @@ int main(int argc, char **argv)
     CHECK(r == SH_FS_MATCH, "Speed: another photo of A unlocks (%llu ms of fake time; %s)", (unsigned long long)took, lastlog);
     r = scan(A0, 0, &took);
     CHECK(r == SH_FS_MATCH, "Speed: A's set-up photo unlocks (%llu ms)", (unsigned long long)took);
+    {   /* 9i's dark room: the face's mean grey ~15 (scans wanted >= 20, set-up nothing): it must still unlock */
+        dim = 0.12f;
+        cur = A1; pose = 0; scene = scene_dim;
+        uint64_t t0d = fake_ms;
+        int rr = sh_face_scan(1) < 0 ? -1 : SH_FS_RUN;
+        while (rr == SH_FS_RUN && (rr = sh_face_poll(0)) == SH_FS_RUN && fake_ms - t0d < 10000) run_ms(10);
+        CHECK(rr == SH_FS_MATCH, "a dim face (9i's dark room, x0.12) still unlocks (%s)", lastlog);
+        dim = 1;
+    }
     r = scan(0, 0, &took);
     CHECK(r == SH_FS_NOFACE, "no face: 'no face', not a failure (%llu ms)", (unsigned long long)took);
     for (int i = 0; i < FACE_FAILS_MAX; i++) {

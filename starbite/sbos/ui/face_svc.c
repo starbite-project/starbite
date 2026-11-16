@@ -274,11 +274,31 @@ static void run_engine(void (*on_det)(void), void (*on_emb)(void), int may_feed)
 }
 
 /* -- the scan */
+/* round 2: the face's box (a little larger) to the camera's metering: the exposure is set on the face, not the room */
+static void tell_roi(void)
+{
+    if (!P.cam_roi) return;
+    if (!F.eng.nfaces) { P.cam_roi(0, 0, 0, 0, 0); return; }
+    float x = F.eng.det.x + F.eng.det.w * 0.15f, y = F.eng.det.y + F.eng.det.h * 0.1f;
+    float w = F.eng.det.w * 0.7f, h = F.eng.det.h * 0.8f;   /* the skin: no hair, no background */
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (w >= 4 && h >= 4) P.cam_roi(1, (unsigned)x, (unsigned)y, (unsigned)w, (unsigned)h);
+}
+/* round 2: frames before the exposure settles look nothing like the set-up's (9i: "never recognises"); they are
+ * used once it has settled, or after 0.5 s from the first frame whatever it is (Speed stays quick) */
+static int frame_usable(void)
+{
+    if (!P.cam_settled || P.cam_settled()) return 1;
+    return F.t_first && P.now_ms() - F.t_first >= 500;
+}
 static void scan_det(void)
 {
+    tell_roi();
+    if (!frame_usable()) return;
     face_scan_det(&F.scan, F.eng.nfaces, &F.eng.det, &F.eng.sig, P.now_ms());
     /* an embedding of this frame when none is running and the face is big and bright enough to be worth it */
-    if (F.eng.nfaces && !F.eng.emb_busy && F.eng.sig.size >= FACE_MIN_SIZE && F.eng.sig.bright >= 20) (void)face_eng_embed(&F.eng);
+    if (F.eng.nfaces && !F.eng.emb_busy && F.eng.sig.size >= FACE_MIN_SIZE && F.eng.sig.bright >= FACE_MIN_BRIGHT) (void)face_eng_embed(&F.eng);
 }
 static void scan_emb(void) { face_scan_emb(&F.scan, face_tpl_score(&F.tpl, F.eng.emb), P.now_ms()); }
 static void scan_log(int r)
@@ -339,7 +359,10 @@ static void scan_tick(void)
 /* -- set-up */
 static void enrol_det(void)
 {
+    tell_roi();
     if (!F.eng.nfaces) { F.hint = SH_FH_NONE; return; }
+    if (P.cam_settled && !P.cam_settled()) return;     /* the set-up only from settled frames */
+    if (F.eng.sig.size < FACE_MIN_SIZE || F.eng.sig.bright < FACE_MIN_BRIGHT) return;   /* the scans' own rule */
     F.hint = F.eng.sig.size < FACE_CLOSER_SIZE ? SH_FH_CLOSER : F.eng.sig.bright < 35 ? SH_FH_LIGHT : SH_FH_NONE;
     if (!F.eng.emb_busy && face_enrol_det(&F.en, &F.eng.sig, F.eng.det.score) >= 0) {
         if (face_eng_embed(&F.eng) < 0) F.en.want = -1;
@@ -467,7 +490,15 @@ int fsvc_bench_start(void)
 
 /* -- the face test image: the camera with nobody enrolled (an empty template set: no match is possible) */
 static uint32_t camtest_ms;
-static void camtest_det(void) { if (F.eng.nfaces && !F.eng.emb_busy) (void)face_eng_embed(&F.eng); }
+static int camtest_faces;
+static void camtest_det(void)
+{
+    tell_roi();
+    camtest_faces += F.eng.nfaces > 0;
+    if (F.eng.nfaces && !F.eng.emb_busy) (void)face_eng_embed(&F.eng);
+}
+int fsvc_camtest_faces(void) { return F.job == J_CAMTEST ? camtest_faces : 0; }
+void fsvc_camtest_stop_after(unsigned ms) { if (F.job == J_CAMTEST) camtest_ms = (uint32_t)(P.now_ms() - F.t0) + ms; }
 static void camtest_emb(void) { }
 static void camtest_tick(void)
 {
@@ -482,7 +513,9 @@ static void camtest_tick(void)
     lb_d(&l, P.now_ms() - F.t0);
     lb_s(&l, " ms (detection ");
     lb_d(&l, F.dets ? F.det_us / (uint32_t)F.dets / 1000 : 0);
-    lb_s(&l, " ms); faces embedded ");
+    lb_s(&l, " ms); frames with a face ");
+    lb_d(&l, (uint64_t)camtest_faces);
+    lb_s(&l, "; faces embedded ");
     lb_d(&l, (uint64_t)F.embeds);
     lb_s(&l, " (");
     lb_d(&l, F.embeds ? F.emb_us / (uint32_t)F.embeds / 1000 : 0);
@@ -497,6 +530,7 @@ int fsvc_camera_test(unsigned ms)
 {
     if (pack(1) <= 0 || F.job) return 0;
     camtest_ms = ms;
+    camtest_faces = 0;
     return job_begin(J_CAMTEST) == 0;
 }
 int fsvc_result_first_frame_ms(void) { return F.last_first; }
@@ -591,7 +625,7 @@ int sh_face_enrol_poll(int *poses, int *hint)
 }
 const uint32_t *sh_face_frame(int *w, int *h, unsigned *seq)
 {
-    if (F.job != J_ENROL || !F.cam_on) return 0;
+    if ((F.job != J_ENROL && F.job != J_CAMTEST) || !F.cam_on) return 0;   /* (the face test's screen too) */
     unsigned s = 0;
     const uint32_t *px = P.cam_frame(&s);
     if (!px) return 0;

@@ -20,6 +20,10 @@ struct fsvc_plat {
     int (*cam_open)(unsigned w, unsigned h);
     const uint32_t *(*cam_frame)(unsigned *seq);
     void (*cam_close)(void);
+    /* round 2 (may be 0): the face's box to the camera's exposure (frame pixels; valid 0: none), the exposure
+     * settled (1) or still moving (0) */
+    void (*cam_roi)(int valid, unsigned x, unsigned y, unsigned w, unsigned h);
+    int (*cam_settled)(void);
     int (*blob_get)(const char *name, void *p, unsigned cap);
     int (*blob_put)(const char *name, const void *p, unsigned n);   /* n 0 = delete */
     int (*pref_int)(const char *key, int def);
@@ -46,7 +50,9 @@ int fsvc_bench_start(void);
 /* the face test image: the camera for ms with nobody enrolled (no unlock possible): the first frame's time, the
  * detections, the turns (a log line); 1 started */
 int fsvc_camera_test(unsigned ms);
-int fsvc_result_first_frame_ms(void);   /* the last job's first frame after the camera's start (0: none) */
+int fsvc_result_first_frame_ms(void);
+int fsvc_camtest_faces(void);           /* the camera test: frames with a face so far */
+void fsvc_camtest_stop_after(unsigned ms);   /* the camera test ends ms from now */   /* the last job's first frame after the camera's start (0: none) */
 void fsvc_host_enrolled(void);          /* the host's stills (fake platform only) */
 
 #endif

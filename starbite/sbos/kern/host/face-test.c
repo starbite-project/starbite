@@ -333,25 +333,40 @@ static void test_enrol(void)
     g.size = 0.2f;
     CHECK(face_enrol_det(&en, &g, 0.9f) == FB_CENTRE, "a straight face fills the centre");
     CHECK(face_enrol_det(&en, &g, 0.95f) < 0, "one embedding at a time");
-    CHECK(face_enrol_emb(&en, me) == 1 && face_enrol_count(&en) == 1, "the centre is kept");
+    /* round 2: the centre wants 3 embeddings (averaged), the others 2; each a noisy look at the same face */
+    at_cos(me, 0.75f, 900, v);
+    CHECK(face_enrol_emb(&en, v) == 1 && face_enrol_count(&en) == 0 && face_enrol_seen(&en) == 1, "the centre's first look is kept (not full yet)");
+    for (int k = 1; k < FACE_ENROL_CENTRE_N; k++) {
+        CHECK(face_enrol_det(&en, &g, 0.9f) == FB_CENTRE, "the centre wants look %d", k + 1);
+        at_cos(me, 0.75f, 900 + (unsigned)k, v);
+        CHECK(face_enrol_emb(&en, v) == 1, "the centre's look %d kept", k + 1);
+    }
+    CHECK(face_enrol_count(&en) == 1 && face_enrol_det(&en, &g, 0.9f) < 0, "the centre is full after %d looks", FACE_ENROL_CENTRE_N);
+    {   /* the mean of three looks at 0.75 is nearer the face than any one look */
+        float c[FACE_DIM];
+        for (int k = 0; k < FACE_DIM; k++) c[k] = (float)en.t.v[FB_CENTRE][k];
+        CHECK(face_cos(c, me) > 0.85f, "the averaged centre is at %.3f to the face (each look 0.75)", face_cos(c, me));
+    }
     struct { float yaw, pitch; int pose; } P[] = { { -0.2f, 0.6f, FB_LEFT }, { 0.2f, 0.6f, FB_RIGHT },
                                                    { 0.0f, 0.45f, FB_UP }, { 0.0f, 0.75f, FB_DOWN } };
     for (int i = 0; i < 4; i++) {
         struct face_sig h = sig(P[i].yaw, 0.3f);
         h.pitch = P[i].pitch;
-        int p = face_enrol_det(&en, &h, 0.9f);
-        CHECK(p == P[i].pose, "pose %d is recognised (%d)", P[i].pose, p);
-        if (i == 1) {
-            unitv(other, 77);
-            CHECK(face_enrol_emb(&en, other) == 0, "another person's face is refused mid-enrolment");
-            p = face_enrol_det(&en, &h, 0.9f);
+        for (int k = 0; k < FACE_ENROL_POSE_N; k++) {
+            int p = face_enrol_det(&en, &h, 0.9f);
+            CHECK(p == P[i].pose, "pose %d is recognised (%d)", P[i].pose, p);
+            if (i == 1 && k == 0) {
+                unitv(other, 77);
+                CHECK(face_enrol_emb(&en, other) == 0, "another person's face is refused mid-enrolment");
+                p = face_enrol_det(&en, &h, 0.9f);
+            }
+            at_cos(me, 0.72f, 100 + (unsigned)(i * 10 + k), v);
+            CHECK(face_enrol_emb(&en, v) == 1, "pose %d look %d kept", p, k + 1);
         }
-        at_cos(me, 0.72f, 100 + (unsigned)i, v);
-        CHECK(face_enrol_emb(&en, v) == 1, "pose %d kept", p);
     }
     CHECK(face_enrol_done(&en), "all five poses: done");
-    at_cos(me, 0.6f, 555, v);
-    CHECK(face_tpl_score(&en.t, v) >= 0.59f, "the record matches the person (%.3f)", face_tpl_score(&en.t, v));
+    at_cos(me, 0.75f, 555, v);                     /* a new look as good as the set-up's */
+    CHECK(face_tpl_score(&en.t, v) >= 0.6f, "a new look matches the record (%.3f >= 0.6)", face_tpl_score(&en.t, v));
 }
 
 /* ---- the models (needs the pack and the reference file) ----------------------------------------------------- */
