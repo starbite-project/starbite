@@ -234,14 +234,21 @@ uint32_t cam_isp_bmp(const uint32_t *px, unsigned w, unsigned h, unsigned stride
 /* ==== the pipeline v2 (cam.h): area resample, lens shading, white balance, colour matrix, sRGB-like tone ========== */
 #define V2_MAXW 1024U                       /* cells across (816) and output pixels across (<= 816) */
 #define V2_TILE 8U
-static uint16_t v2_la[2U * V2_MAXW + 8U], v2_lb[2U * V2_MAXW + 8U];   /* a raw row pair, cached */
-static uint32_t v2_h[V2_MAXW][3];           /* a cell row resampled across: R, G, B (x2 scale), x the column weights */
-static uint32_t v2_acc[V2_MAXW][3];         /* the U row being gathered */
-static uint32_t v2_tile[V2_TILE][V2_MAXW];  /* finished U rows, written out rotated eight at a time */
+#define V2_BANDS 4U                         /* the rows in four bands, one a core (cam_isp_set_par) */
+struct v2band {
+    uint16_t la[2U * V2_MAXW + 8U] __attribute__((aligned(16))), lb[2U * V2_MAXW + 8U] __attribute__((aligned(16)));
+    uint32_t h[V2_MAXW][3];                 /* a cell row resampled across: R, G, B (x2 scale), x the column weights */
+    uint32_t acc[V2_MAXW][3];               /* the U row being gathered */
+    uint32_t tile[V2_TILE][V2_MAXW];        /* finished U rows, written out rotated eight at a time */
+    unsigned hrow;                          /* the cell row in h (0xFFFFFFFF none) */
+    const volatile uint8_t *hp;             /* (whose frame h holds) */
+};
+static struct v2band v2_b[V2_BANDS];
+static void (*v2_par)(void (*fn)(void *, int), void *arg, int n);
+void cam_isp_set_par(void (*par)(void (*fn)(void *, int), void *arg, int n)) { v2_par = par; }
 static uint16_t v2_c0[V2_MAXW], v2_c1[V2_MAXW], v2_w0[V2_MAXW], v2_w1[V2_MAXW], v2_harea[V2_MAXW];
 static uint32_t v2_colk[V2_MAXW], v2_dx2[V2_MAXW];
-static unsigned v2_geo_cw, v2_geo_uw, v2_hrow = 0xFFFFFFFFU;   /* the column tables' size; the cell row in v2_h */
-static const volatile uint8_t *v2_hp;       /* (whose frame v2_h holds) */
+static unsigned v2_geo_cw, v2_geo_uw;       /* the column tables' size */
 static uint8_t v2_lut[2][4096];
 static int v2_lut_ready;
 
@@ -302,7 +309,12 @@ static void v2_line(const struct cam_raw *r, unsigned y, uint16_t *dst)
         typedef uint64_t v2u __attribute__((vector_size(16)));
         const volatile v2u *s = (const volatile v2u *)(r->p + (size_t)y * r->stride);
         v2u *d = (v2u *)(void *)dst;
-        for (unsigned i = 0; i < (r->w * 2U + 15U) / 16U; ++i)
+        unsigned n = (r->w * 2U + 15U) / 16U, i = 0;
+        for (; i + 4U <= n; i += 4U) {      /* four loads in flight before their stores (the memory is uncached) */
+            v2u a = s[i], b = s[i + 1U], c = s[i + 2U], e = s[i + 3U];
+            d[i] = a, d[i + 1U] = b, d[i + 2U] = c, d[i + 3U] = e;
+        }
+        for (; i < n; ++i)
             d[i] = s[i];
         return;
     }
@@ -310,8 +322,9 @@ static void v2_line(const struct cam_raw *r, unsigned y, uint16_t *dst)
         dst[x] = (uint16_t)cam_isp_px(r, x, y);
 }
 /* cell row cy across, resampled to uw columns (the column tables), into v2_h */
-static void v2_hrow_make(const struct cam_raw *r, unsigned cy, unsigned uw, unsigned black)
+static void v2_hrow_make(struct v2band *B, const struct cam_raw *r, unsigned cy, unsigned uw, unsigned black)
 {
+    uint16_t *v2_la = B->la, *v2_lb = B->lb;
     v2_line(r, 2U * cy, v2_la);
     v2_line(r, 2U * cy + 1U, v2_lb);
     const uint8_t *pl = place[r->bayer & 3U];
@@ -327,10 +340,10 @@ static void v2_hrow_make(const struct cam_raw *r, unsigned cy, unsigned uw, unsi
             s1 += w * (c[1] + c[2]);
             s2 += w * 2U * c[3];
         }
-        v2_h[ux][0] = s0, v2_h[ux][1] = s1, v2_h[ux][2] = s2;
+        B->h[ux][0] = s0, B->h[ux][1] = s1, B->h[ux][2] = s2;
     }
-    v2_hrow = cy;
-    v2_hp = r->p;
+    B->hrow = cy;
+    B->hp = r->p;
 }
 /* the unrotated (ux, uy) -> the output's pixel */
 static uint32_t *v2_dst(const struct cam_out *o, unsigned uw, unsigned uh, unsigned ux, unsigned uy)
@@ -346,11 +359,11 @@ static uint32_t *v2_dst(const struct cam_out *o, unsigned uw, unsigned uh, unsig
         rx = o->w - 1U - rx;
     return o->px + (size_t)ry * o->stride + rx;
 }
-static void v2_flush(const struct cam_out *o, unsigned uw, unsigned uh, unsigned uy0, unsigned n)
+static void v2_flush(struct v2band *B, const struct cam_out *o, unsigned uw, unsigned uh, unsigned uy0, unsigned n)
 {
     for (unsigned ux = 0; ux < uw; ++ux)
         for (unsigned t = 0; t < n; ++t)
-            *v2_dst(o, uw, uh, ux, uy0 + t) = v2_tile[t][ux];
+            *v2_dst(o, uw, uh, ux, uy0 + t) = B->tile[t][ux];
 }
 /* the ROI (output pixels) as an unrotated rectangle */
 static void v2_roi_u(const struct cam_out *o, const struct cam_roi *roi, unsigned uw, unsigned uh, unsigned *x0,
@@ -378,38 +391,31 @@ static void v2_roi_u(const struct cam_out *o, const struct cam_roi *roi, unsigne
     *x0 = ux[0] < ux[1] ? ux[0] : ux[1], *x1 = ux[0] < ux[1] ? ux[1] : ux[0];
     *y0 = uy[0] < uy[1] ? uy[0] : uy[1], *y1 = uy[0] < uy[1] ? uy[1] : uy[0];
 }
-void cam_isp_process(const struct cam_raw *r, const struct cam_wb *wb, const struct cam_tune *t, const struct cam_out *o,
-                     const struct cam_roi *roi, unsigned y0, unsigned y1, struct cam_pstats *st)
+struct v2job {
+    const struct cam_raw *r;
+    const struct cam_wb *wb;
+    const struct cam_tune *tu;
+    const struct cam_out *o;
+    const struct cam_roi *roi;
+    unsigned y[V2_BANDS + 1U];
+    struct cam_pstats st[V2_BANDS];
+    int want_st;
+};
+static void v2_band(void *arg, int bi)
 {
-    v2_tables();
+    struct v2job *J = arg;
+    struct v2band *BD = &v2_b[bi];
+    const struct cam_raw *r = J->r;
+    const struct cam_wb *wb = J->wb;
+    const struct cam_tune *tu = J->tu;
+    const struct cam_out *o = J->o;
+    const struct cam_roi *roi = J->roi;
+    unsigned y0 = J->y[bi], y1 = J->y[bi + 1];
+    struct cam_pstats *st = J->want_st ? &J->st[bi] : 0;
     unsigned cw = r->w / 2U, ch = r->h / 2U, rot = o->xform & 3U;
     unsigned uw = (rot & 1U) ? o->h : o->w, uh = (rot & 1U) ? o->w : o->h;
-    if (!cw || !ch || !uw || !uh || cw > V2_MAXW || uw > V2_MAXW || uw > cw || uh > ch)
-        return;
-    if (y1 > uh)
-        y1 = uh;
     unsigned black = r->black < 1000U ? r->black : 0, span = 1023U - black;
-    /* the column tables: U column ux covers cells [a, b) in 1/256 cell */
-    if (v2_geo_cw != cw || v2_geo_uw != uw) {
-        uint32_t hx = uw / 2U ? uw / 2U : 1U;
-        for (unsigned ux = 0; ux < uw; ++ux) {
-            uint32_t a = (uint32_t)((uint64_t)ux * cw * 256U / uw), b = (uint32_t)((uint64_t)(ux + 1U) * cw * 256U / uw);
-            v2_c0[ux] = (uint16_t)(a >> 8), v2_c1[ux] = (uint16_t)((b - 1U) >> 8);
-            v2_w0[ux] = (uint16_t)(v2_c0[ux] == v2_c1[ux] ? b - a : 256U - (a & 255U));
-            v2_w1[ux] = (uint16_t)(v2_c0[ux] == v2_c1[ux] ? b - a : b - (v2_c1[ux] << 8));
-            v2_harea[ux] = (uint16_t)(b - a);
-            v2_colk[ux] = (1U << 24) / (b - a);
-            int32_t d = (int32_t)(2U * ux + 1U) - (int32_t)uw;     /* x 2 from the middle */
-            v2_dx2[ux] = (uint32_t)((int64_t)d * d * 16384 / (4 * (int64_t)hx * hx));   /* (dx / hx)^2, Q14 */
-        }
-        v2_geo_cw = cw, v2_geo_uw = uw, v2_hrow = 0xFFFFFFFFU;
-    }
-    const struct cam_tune *tu = t;
-    struct cam_tune def;
-    if (!tu) {
-        cam_tune_default(&def);
-        tu = &def;
-    }
+    (void)cw;
     const uint8_t *tone = v2_lut[tu->tone ? 1 : 0];
     unsigned rx0, ry0, rx1, ry1;
     v2_roi_u(o, roi, uw, uh, &rx0, &ry0, &rx1, &ry1);
@@ -419,15 +425,15 @@ void cam_isp_process(const struct cam_raw *r, const struct cam_wb *wb, const str
         uint32_t a = (uint32_t)((uint64_t)uy * ch * 256U / uh), b = (uint32_t)((uint64_t)(uy + 1U) * ch * 256U / uh);
         unsigned c0 = a >> 8, c1 = (b - 1U) >> 8;
         for (unsigned ux = 0; ux < uw; ++ux)
-            v2_acc[ux][0] = v2_acc[ux][1] = v2_acc[ux][2] = 0;
+            BD->acc[ux][0] = BD->acc[ux][1] = BD->acc[ux][2] = 0;
         for (unsigned cy = c0; cy <= c1; ++cy) {
             uint32_t wy = c0 == c1 ? b - a : cy == c0 ? 256U - (a & 255U) : cy == c1 ? b - (c1 << 8) : 256U;
-            if (v2_hrow != cy || v2_hp != r->p)
-                v2_hrow_make(r, cy, uw, black);
+            if (BD->hrow != cy || BD->hp != r->p)
+                v2_hrow_make(BD, r, cy, uw, black);
             for (unsigned ux = 0; ux < uw; ++ux) {
-                v2_acc[ux][0] += (v2_h[ux][0] >> 4) * wy;   /* (>> 4: the sums stay in 32 bits) */
-                v2_acc[ux][1] += (v2_h[ux][1] >> 4) * wy;
-                v2_acc[ux][2] += (v2_h[ux][2] >> 4) * wy;
+                BD->acc[ux][0] += (BD->h[ux][0] >> 4) * wy;   /* (>> 4: the sums stay in 32 bits) */
+                BD->acc[ux][1] += (BD->h[ux][1] >> 4) * wy;
+                BD->acc[ux][2] += (BD->h[ux][2] >> 4) * wy;
             }
         }
         /* to 12 bits: acc x 16 / (harea x varea) / (2 x span) x 4095 */
@@ -441,7 +447,7 @@ void cam_isp_process(const struct cam_raw *r, const struct cam_wb *wb, const str
             /* lens shading: 1 + (corner - 1) x r^2, r^2 = 1 at the corners ((dx/hx)^2 + (dy/hy)^2 over 2) */
             uint32_t g = 256U + (uint32_t)(((uint64_t)lsc_k * ((v2_dx2[ux] + dy2) >> 1)) >> 14);
             for (unsigned c = 0; c < 3U; ++c) {
-                uint64_t v = (((uint64_t)v2_acc[ux][c] * v2_colk[ux]) >> 24) * rowk >> 24;
+                uint64_t v = (((uint64_t)BD->acc[ux][c] * v2_colk[ux]) >> 24) * rowk >> 24;
                 v = v * g >> 8;
                 L[c] = (uint32_t)(v > 4095U ? 4095U : v);
             }
@@ -468,13 +474,73 @@ void cam_isp_process(const struct cam_raw *r, const struct cam_wb *wb, const str
                 int32_t v = (tu->ccm[3U * k] * R + tu->ccm[3U * k + 1U] * G + tu->ccm[3U * k + 2U] * B) >> 10;
                 o3[k] = v < 0 ? 0 : v > 4095 ? 4095 : v;
             }
-            v2_tile[tn][ux] = 0xFF000000U | ((uint32_t)tone[o3[0]] << 16) | ((uint32_t)tone[o3[1]] << 8) | tone[o3[2]];
+            BD->tile[tn][ux] = 0xFF000000U | ((uint32_t)tone[o3[0]] << 16) | ((uint32_t)tone[o3[1]] << 8) | tone[o3[2]];
         }
         if (++tn == V2_TILE) {
-            v2_flush(o, uw, uh, tstart, tn);
+            v2_flush(BD, o, uw, uh, tstart, tn);
             tn = 0, tstart = uy + 1U;
         }
     }
     if (tn)
-        v2_flush(o, uw, uh, tstart, tn);
+        v2_flush(BD, o, uw, uh, tstart, tn);
+}
+
+void cam_isp_process(const struct cam_raw *r, const struct cam_wb *wb, const struct cam_tune *t, const struct cam_out *o,
+                     const struct cam_roi *roi, unsigned y0, unsigned y1, struct cam_pstats *st)
+{
+    v2_tables();
+    unsigned cw = r->w / 2U, ch = r->h / 2U, rot = o->xform & 3U;
+    unsigned uw = (rot & 1U) ? o->h : o->w, uh = (rot & 1U) ? o->w : o->h;
+    if (!cw || !ch || !uw || !uh || cw > V2_MAXW || uw > V2_MAXW || uw > cw || uh > ch)
+        return;
+    if (y1 > uh)
+        y1 = uh;
+    /* the column tables: U column ux covers cells [a, b) in 1/256 cell */
+    if (v2_geo_cw != cw || v2_geo_uw != uw) {
+        uint32_t hx = uw / 2U ? uw / 2U : 1U;
+        for (unsigned ux = 0; ux < uw; ++ux) {
+            uint32_t a = (uint32_t)((uint64_t)ux * cw * 256U / uw), b = (uint32_t)((uint64_t)(ux + 1U) * cw * 256U / uw);
+            v2_c0[ux] = (uint16_t)(a >> 8), v2_c1[ux] = (uint16_t)((b - 1U) >> 8);
+            v2_w0[ux] = (uint16_t)(v2_c0[ux] == v2_c1[ux] ? b - a : 256U - (a & 255U));
+            v2_w1[ux] = (uint16_t)(v2_c0[ux] == v2_c1[ux] ? b - a : b - (v2_c1[ux] << 8));
+            v2_harea[ux] = (uint16_t)(b - a);
+            v2_colk[ux] = (1U << 24) / (b - a);
+            int32_t d = (int32_t)(2U * ux + 1U) - (int32_t)uw;     /* x 2 from the middle */
+            v2_dx2[ux] = (uint32_t)((int64_t)d * d * 16384 / (4 * (int64_t)hx * hx));   /* (dx / hx)^2, Q14 */
+        }
+        v2_geo_cw = cw, v2_geo_uw = uw;
+    }
+    const struct cam_tune *tu = t;
+    struct cam_tune def;
+    if (!tu) {
+        cam_tune_default(&def);
+        tu = &def;
+    }
+    static struct v2job J;                  /* (one frame at a time: the camera's poll) */
+    J.r = r, J.wb = wb, J.tu = tu, J.o = o, J.roi = roi, J.want_st = st != 0;
+    unsigned nb = v2_par && y1 - y0 >= 64U ? V2_BANDS : 1U;
+    for (unsigned b = 0; b <= nb; ++b) {
+        unsigned y = y0 + (unsigned)(((uint64_t)(y1 - y0) * b / nb) & ~7ULL);   /* whole tiles a band */
+        J.y[b] = b == nb ? y1 : y;
+    }
+    for (unsigned b = 0; b < nb; ++b) {
+        uint8_t *z = (uint8_t *)&J.st[b];
+        for (unsigned i = 0; i < sizeof J.st[b]; ++i)
+            z[i] = 0;
+        v2_b[b].hrow = 0xFFFFFFFFU;          /* (each frame anew: the raw slot is reused) */
+    }
+    if (nb > 1U)
+        v2_par(v2_band, &J, (int)nb);
+    else
+        v2_band(&J, 0);
+    if (st)
+        for (unsigned b = 0; b < nb; ++b) {
+            const struct cam_pstats *q = &J.st[b];
+            st->n += q->n, st->gn += q->gn, st->clip += q->clip, st->cn += q->cn, st->rn += q->rn;
+            st->ysum += q->ysum, st->csum += q->csum, st->rsum += q->rsum;
+            for (unsigned c = 0; c < 3U; ++c)
+                st->sum[c] += q->sum[c], st->gsum[c] += q->gsum[c];
+            for (unsigned k = 0; k < 16U; ++k)
+                st->hist[k] += q->hist[k];
+        }
 }

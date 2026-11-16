@@ -200,6 +200,8 @@ void cam_tune_default(struct cam_tune *t);
 void cam_isp_process(const struct cam_raw *r, const struct cam_wb *wb, const struct cam_tune *t, const struct cam_out *o,
                      const struct cam_roi *roi, unsigned y0, unsigned y1, struct cam_pstats *st);
 unsigned cam_isp_rows(const struct cam_out *o);   /* the unrotated output's height (what y0 / y1 run over) */
+/* the other cores for v2 (kern_next.c's band workers: rows in 4 bands); 0: one core. 9i's phone: 77 ms on one A55 */
+void cam_isp_set_par(void (*par)(void (*fn)(void *arg, int i), void *arg, int n));
 
 /* the BMP file of an XRGB picture: its length, or 0 if cap is too small */
 uint32_t cam_isp_bmp(const uint32_t *px, unsigned w, unsigned h, unsigned stride, uint8_t *dst, uint32_t cap);

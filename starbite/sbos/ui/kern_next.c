@@ -54,6 +54,7 @@ static int drv_touch_dark(void);
 #define KT_DRV_FACE 37                          /* Face Unlock: the camera's poll + the face's work (~10 ms while busy) */
 static void prewarm_arm(int screen_on);
 static void face_tick(void);                    /* Face Unlock (its block after the camera's) */
+static int cam_running;                         /* (the camera's block: the Camera app has it) */
 static void face_init(void);
 
 /* ---- the heap (tk_heap.c) on one block of the arena ---------------------------------------------------- */
@@ -1293,6 +1294,7 @@ void next_kinit(void)
 #endif
 #ifndef SBOS_NEXT_ONECORE
     comp.par = kpar;
+    cam_isp_set_par(kpar);                           /* the camera's pipeline v2 on the band workers (9i: 77 ms on one A55) */
     tk_par = kpar;                                   /* the bakes' row loops too */
 #endif
     /* the bake one step per loop turn (the watchdog is fed between them; the screen fills in); the top step from
@@ -1485,7 +1487,7 @@ void next_ktimer(unsigned id)
         return;
     }
     if (ready && id == 23) {
-        if (fsvc_busy()) { kt_set(KT_UI, 23, sb_ms(), 2000, 0); return; }   /* Face Unlock's work uses the cores */
+        if (fsvc_busy() || cam_running) { kt_set(KT_UI, 23, sb_ms(), 2000, 0); return; }   /* Face Unlock / the camera use the cores */
         if (!ticking && !sh_moving()) workers_stop();
         return;
     }
@@ -3001,6 +3003,7 @@ static int cam_running;
 static int face_cam;                            /* Face Unlock has the camera (its block below) */
 static void cam_tick(void)
 {
+    workers_start();                                 /* the camera's pipeline in four bands */
     int r = cam_poll();
     if (r > 0) { kt_set(KT_UI, KT_DRV_CAM, sb_ms(), 10, 0); return; }
     cam_running = 0;
@@ -3305,7 +3308,7 @@ static uint32_t *ft_pv[FT_CAPS];
 static uint32_t ft_lines[FT_CAPS], ft_gain[FT_CAPS], ft_luma[FT_CAPS];
 static int ft_cap, ft_save, ft_saved, ft_save_fail;
 static uint32_t ft_turns0, ft_excluded;
-static uint64_t ft_cam_t0, ft_count_t;
+static uint64_t ft_cam_t0, ft_count_t, ft_face_t;   /* (ft_face_t: the first face seen; the captures count from it) */
 static int ft_count;
 /* the test's own screen (shell_face.inc fx_test): face=test-count:N, test-run, test-done */
 static void ft_screen(const char *key, int n)
@@ -3373,15 +3376,35 @@ int face_selftest_step(void)
         ft_count_t = sb_ms();
         if (--ft_count > 0) { ft_screen("test-count", ft_count); return 0; }
         sb_log("selftest: next-face: LOOK AT THE PHONE now (about 30 cm), for 10 s: the camera runs 9 s");
-        if (!fsvc_camera_test(9000)) { sb_log("selftest: next-face: FAILED: the camera test did not start (the camera?)"); return -1; }
-        ft_screen("test-run", 0);
+        if (!fsvc_camera_test(40000)) { sb_log("selftest: next-face: FAILED: the camera test did not start (the camera?)"); return -1; }
+        ft_screen("test-noface", 0);                 /* until a face is seen: "hold the phone up in front of your face" */
         ft_cam_t0 = sb_ms();
+        ft_face_t = 0;
         ft_cap = 0;
         ftest_phase = 3;
         return 0;
     case 3:
-        /* the captures, one a step (each: ~4 MB of uncached raw, the preview) */
-        if (ft_cap < FT_CAPS && face_cam && sb_ms() - ft_cam_t0 >= ft_at[ft_cap]) {
+        /* a face first (three frames with one), up to 30 s; then the captures, one a step, 9 s from it */
+        if (!ft_face_t) {
+            if (fsvc_camtest_faces() >= 3) {
+                ft_face_t = sb_ms();
+                fsvc_camtest_stop_after(9500);
+                ft_screen("test-run", 0);
+                struct ub u;
+                ub_init(&u);
+                ub_s(&u, "selftest: next-face: a face is seen after ");
+                ub_dec(&u, sb_ms() - ft_cam_t0);
+                ub_s(&u, " ms of camera: the captures start");
+                sb_log(u.b);
+            } else if (sb_ms() - ft_cam_t0 > 30000) {
+                ft_face_t = sb_ms();                 /* no face in 30 s: capture what is there anyway */
+                fsvc_camtest_stop_after(9500);
+                ft_screen("test-run", 0);
+                sb_log("selftest: next-face: NO FACE in 30 s; capturing whatever the camera sees");
+            }
+            if (!ft_face_t) return 0;
+        }
+        if (ft_cap < FT_CAPS && face_cam && sb_ms() - ft_face_t >= ft_at[ft_cap]) {
             struct cam_ae_info ai;
             cam_ae_info(&ai);
             ft_raw[ft_cap] = tk_alloc((size_t)1632 * 1224 * 2);
@@ -3396,8 +3419,8 @@ int face_selftest_step(void)
             ub_s(&u, "next: face: capture ");
             ub_dec(&u, (uint64_t)ft_cap);
             ub_s(&u, " at ");
-            ub_dec(&u, sb_ms() - ft_cam_t0);
-            ub_s(&u, " ms: raw ");
+            ub_dec(&u, sb_ms() - ft_face_t);
+            ub_s(&u, " ms after the first face: raw ");
             ub_s(&u, ft_raw[ft_cap] ? "ok" : "MISSING");
             ub_s(&u, ", exposure ");
             ub_dec(&u, ai.lines);

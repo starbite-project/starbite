@@ -489,7 +489,15 @@ int fsvc_bench_start(void)
 
 /* -- the face test image: the camera with nobody enrolled (an empty template set: no match is possible) */
 static uint32_t camtest_ms;
-static void camtest_det(void) { tell_roi(); if (F.eng.nfaces && !F.eng.emb_busy) (void)face_eng_embed(&F.eng); }
+static int camtest_faces;
+static void camtest_det(void)
+{
+    tell_roi();
+    camtest_faces += F.eng.nfaces > 0;
+    if (F.eng.nfaces && !F.eng.emb_busy) (void)face_eng_embed(&F.eng);
+}
+int fsvc_camtest_faces(void) { return F.job == J_CAMTEST ? camtest_faces : 0; }
+void fsvc_camtest_stop_after(unsigned ms) { if (F.job == J_CAMTEST) camtest_ms = (uint32_t)(P.now_ms() - F.t0) + ms; }
 static void camtest_emb(void) { }
 static void camtest_tick(void)
 {
@@ -504,7 +512,9 @@ static void camtest_tick(void)
     lb_d(&l, P.now_ms() - F.t0);
     lb_s(&l, " ms (detection ");
     lb_d(&l, F.dets ? F.det_us / (uint32_t)F.dets / 1000 : 0);
-    lb_s(&l, " ms); faces embedded ");
+    lb_s(&l, " ms); frames with a face ");
+    lb_d(&l, (uint64_t)camtest_faces);
+    lb_s(&l, "; faces embedded ");
     lb_d(&l, (uint64_t)F.embeds);
     lb_s(&l, " (");
     lb_d(&l, F.embeds ? F.emb_us / (uint32_t)F.embeds / 1000 : 0);
@@ -519,6 +529,7 @@ int fsvc_camera_test(unsigned ms)
 {
     if (pack(1) <= 0 || F.job) return 0;
     camtest_ms = ms;
+    camtest_faces = 0;
     return job_begin(J_CAMTEST) == 0;
 }
 int fsvc_result_first_frame_ms(void) { return F.last_first; }

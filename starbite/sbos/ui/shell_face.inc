@@ -20,6 +20,7 @@ static struct {
     int on, built, poses, done, fail, ehint;
     int wait;                       /* set-up asked for while the pack loads: its mode + 1 */
     int test, count;                /* the face test image's screen: 1 the countdown (count), 2 looking, 3 done */
+    int noface;                     /* (2 with "No Face Yet") */
     int was_locked;                 /* the lock state last told to the platform (sh_face_lock) */
     unsigned seq;
     float a, at;
@@ -134,8 +135,10 @@ static void fx_draw_text(void)
     dc d = mk(&fxtext, "fx-text", 20, 70, 350, 120, 0, 0);
     if (!d.b->px) return;
     if (FX.test) {
-        const char *t = FX.test == 1 ? "Look at the Phone" : FX.test == 2 ? "Keep Looking" : "Thank You";
+        const char *t = FX.test == 1 ? "Look at the Phone" : FX.noface ? "No Face Yet" : FX.test == 2 ? "Keep Looking"
+                      : "Thank You";
         const char *m = FX.test == 1 ? "Hold it upright, about 30 cm away."
+                      : FX.noface ? "Hold the phone up in front of your face."
                       : FX.test == 2 ? "Look at the circle. Don't touch the screen."
                       : "Saving. The phone restarts by itself.";
         d_text_box(&d, TK_IT600, 30, 195, 112, 340, 1, t, 0, 0, INK, 0);
@@ -483,7 +486,8 @@ static void apply_tweens(void);
 /* the face test image (kern_next.c face_selftest_step): face=test-count:N, face=test-run, face=test-done, face=test-off */
 static int fx_test(const char *key, float v)
 {
-    int st = !tk_strcmp(key, "test-count") ? 1 : !tk_strcmp(key, "test-run") ? 2 : !tk_strcmp(key, "test-done") ? 3 : 0;
+    int st = !tk_strcmp(key, "test-count") ? 1 : !tk_strcmp(key, "test-run") ? 2 : !tk_strcmp(key, "test-done") ? 3
+           : !tk_strcmp(key, "test-noface") ? 4 : 0;
     if (!st && tk_strcmp(key, "test-off")) return 0;
     if (!st) { FX.test = 0; FX.on = 0; FX.at = 0; relink(); return 1; }
     int fresh = !FX.on || !FX.test;
@@ -491,6 +495,7 @@ static int fx_test(const char *key, float v)
     FX.count = (int)v;
     FX.poses = 0;
     FX.done = st == 3;
+    if (st == 4) FX.test = 2, FX.noface = 1; else FX.noface = 0;   /* (the camera's circle as in "looking") */
     FX.fail = FX.wait = FX.ehint = 0;
     if (fresh) {
         FX.on = 1;

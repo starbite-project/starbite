@@ -658,6 +658,12 @@ static int near(unsigned a, unsigned b, unsigned tol)
     return a + tol >= b && b + tol >= a;
 }
 
+/* a stand-in for kern_next.c's band workers: the bands in a scrambled order */
+static void fake_par(void (*fn)(void *, int), void *arg, int n)
+{
+    for (int i = n - 1; i >= 0; i -= 2) fn(arg, i);
+    for (int i = n - 2; i >= 0; i -= 2) fn(arg, i);
+}
 static void test_isp(void)
 {
     const unsigned W = 1632, H = 1224;
@@ -851,6 +857,23 @@ static void test_isp(void)
         }
         v1s = sqrt(v1s / (360.0 * 480)), v2s = sqrt(v2s / (360.0 * 480));
         CHECK(v2s * 1.4 < v1s, "v2 noise: sd %.2f against v1's %.2f (8-bit green)", v2s, v1s);
+        /* four bands (the band workers) give the very same picture and statistics as one */
+        {
+            struct cam_pstats p1, p4;
+            cam_tune_default(&tu);
+            memset(&p1, 0, sizeof p1);
+            memset(&p4, 0, sizeof p4);
+            cam_isp_set_par(0);
+            struct cam_out oa = { out, 360, 480, 360, CAM_ROT270 | CAM_MIRROR }, ob = { out2, 360, 480, 360, CAM_ROT270 | CAM_MIRROR };
+            struct cam_roi rr = { 1, 50, 60, 120, 140 };
+            struct cam_wb w3 = { 300, 256, 420 };
+            cam_isp_process(&r, &w3, &tu, &oa, &rr, 0, cam_isp_rows(&oa), &p1);
+            cam_isp_set_par(fake_par);
+            cam_isp_process(&r, &w3, &tu, &ob, &rr, 0, cam_isp_rows(&ob), &p4);
+            cam_isp_set_par(0);
+            CHECK(!memcmp(out, out2, 360u * 480u * 4u) && !memcmp(&p1, &p4, sizeof p1),
+                  "v2 in four bands: the same picture and statistics as one band");
+        }
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         for (int k = 0; k < 10; ++k) cam_isp_process(&r, &one, &tu, &o, 0, 0, cam_isp_rows(&o), &ps);
