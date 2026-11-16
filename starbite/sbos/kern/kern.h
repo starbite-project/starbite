@@ -581,6 +581,7 @@ void kui_set_emergency(int on);
 void kui_gauge(const char *caption, const char *value, int permille, uint32_t c);
 const char *app_tile(int a);        /* the line an app shows under its home tile */
 void kui_toast(const char *t, uint32_t ms);
+int kui_finger_down(void);            /* 1.2-alpha30: a finger is on the screen now (the fire starter's hold) */
 void kui_light(uint32_t argb);
 void kui_heat_light(int on);             /* 1.2-alpha5: Survival's white screen with a status strip */
 int heater_white(void);

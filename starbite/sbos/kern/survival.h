@@ -43,6 +43,15 @@ struct surv_usb {
     int32_t fire_min_left;      /* fire mode: minutes of output left at the measured draw (-1 not yet) */
     uint8_t byp_dtls, chg_dtls; /* the chip's own status nibbles (logged) */
     const char *why;            /* refused / last stop, plain words */
+    /* 1.2-alpha30: the fire starter (fire == 2) */
+    int32_t fs_pulse_ms, fs_repeat, fs_n, fs_max;   /* the mode; pulses done in this hold, at most */
+    int32_t fs_out;             /* 1 the output is on now (a pulse), 0 between pulses */
+    int32_t fs_avg_ma, fs_peak_ma, fs_w10;          /* the last pulse: mean / peak mA out of the port, 0.1 W */
+    int32_t fs_vmin;            /* the last pulse: the lowest VBUS code seen (0 below 3.5 V, 2 ~5 V; -1 none) */
+    int32_t fs_sag_mv;          /* the last pulse: the battery's lowest voltage */
+    int32_t fs_why;             /* SURV_FS_WHY_*: why the last hold ended (or was refused) */
+    int32_t fs_vbyp_mv, fs_cellw10;
+    int32_t fs_load_w10, fs_chip_w10; /* the last pulse: 0.1 W into the load (mA x the port band's middle), in the chip */ /* the last pulse: the boost's mean output (the gauge's VBYP); 0.1 W from the cell */
 };
 /* after the UI's hold-to-arm: start one burst. 0 started, < 0 refused (why in the status) */
 int surv_usb_start(void);
@@ -55,6 +64,32 @@ void surv_usb_stop(const char *why);
 int surv_usb_fire_start(void);
 void surv_usb_hold(void);
 int surv_usb_active(void);                         /* 1 while the output is on (or being put back) */
+/* 1.2-alpha30, the fire starter (docs/USB-FIRE-STARTER.md): pulses of 0.5 / 1 / 2 s at the chip's 0.9 / 1.2 / 1.5 A
+ * step, once or repeated (at most SURV_FS_MAX_PULSES, a rest of max(1 s, the pulse) between), ONLY while a finger
+ * stays on the screen (kui_finger_down(); the UI calls surv_fs_release at the lift). Stricter than the other modes:
+ * off at once at the battery's 45 C, the port collapsing below 3.5 V, any flag the chip raises (its current limit,
+ * the boost's limit, its thermal shutdown, battery overcurrent, OTG dropped by itself), a 3.3 V battery, 60 C on the
+ * USB connector, 65 C on the charger. Then a cooldown of 5 s + 3x the time on (30 s after a fault). The chip's own
+ * protections are never changed. pulse_ms 500 / 1000 / 2000, ilim_ma 900 / 1200 / 1500. 0 started, < 0 refused */
+#define SURV_FS_MAX_PULSES 6
+#define SURV_FS_BAT_STOP_C10 450
+#define SURV_FS_BAT_START_C10 430
+enum { SURV_FS_WHY_NONE, SURV_FS_WHY_DONE, SURV_FS_WHY_RELEASED, SURV_FS_WHY_ILIM, SURV_FS_WHY_VBUS,
+       SURV_FS_WHY_FAULT, SURV_FS_WHY_HOT, SURV_FS_WHY_LOWBAT, SURV_FS_WHY_STOP, SURV_FS_WHY_REFUSED,
+       SURV_FS_WHY_COOL, SURV_FS_WHY_FINGER };
+int surv_fs_start(uint32_t pulse_ms, int repeat, int ilim_ma);
+/* S9 #2's override (attended, the user's test phone; docs/USB-FIRE-STARTER.md 5): ov 1 fast re-arm after the chip's
+ * limit or switch-off (instead of its own ~300 ms rest), 2 the same plus VBYPSET = vbyp (the boost's target; 0 is
+ * 5.0 V). Pulses at most 1 s; a port collapse is logged, not a stop; at most 50 re-arms a pulse; the battery's 45 C,
+ * 3.3 V, the chip's thermal shutdown and battery-overcurrent flags still stop it. Everything back after every hold,
+ * before a restart, and at the next start after a crash. */
+#define SURV_FS_OV_MAX_MS 1000U
+#define SURV_FS_OV_MAX_REARMS 50U
+int surv_fs_start_ov(uint32_t pulse_ms, int repeat, int ilim_ma, int ov, int vbyp);
+/* tol 1, the steel-wool preset (no override): the chip's own limit-and-retry (~30 ms on, ~300 ms off) and the port's
+ * dips are let run as the chip designs them; its switch-off, thermal shutdown, battery overcurrent, 45 C, 3.3 V stop */
+int surv_fs_start_x(uint32_t pulse_ms, int repeat, int ilim_ma, int ov, int vbyp, int tol);
+void surv_fs_release(void);                        /* the finger lifted (ui.c): the output off now */
 void surv_usb_status(struct surv_usb *s);
 extern const char *const surv_usb_guide[];   /* the on-screen guidance, NULL-terminated */
 

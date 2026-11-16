@@ -10,6 +10,7 @@
 #include "sb.h"
 #include "kern.h"
 #include "kinput.h"
+#include "survival.h"
 
 #define POWER_LONG_MS 1000U
 #define BIXBY_LONG_MS 700U
@@ -21,6 +22,18 @@ static uint64_t t_power, t_bixby, vol_next;
 static unsigned vol_key;
 static int power_long_sent, bixby_long_sent, t_down;
 static uint64_t last_input;
+int kin_fire_keys_id;              /* 1.2-alpha30 (kinput.h) */
+uint64_t kin_fire_keys_t;
+static int fire_held;              /* Power held past FIRE_KEY_MS in the fire key mode */
+#define FIRE_KEY_MS 1000U
+static int fire_keys(uint64_t now)
+{
+    return kin_fire_keys_id > 0 && kin_fire_keys_t && now - kin_fire_keys_t < 2000U && K.screen_on;
+}
+int kin_fire_trigger(void)
+{
+    return fire_held && (keys_stable & SB_K_POWER) && fire_keys(sb_ms());
+}
 int input_fast;                    /* P3k: set by Starbite OS Next: 16 ms reads while the screen is on (no 50 ms first touch) */
 
 void kin_push_id(int type, int id, int x, int y)
@@ -91,6 +104,30 @@ static void keys_poll(uint64_t now)
     keys_seen &= stable;
     if (pressed | released)
         last_input = now;
+    if (fire_held && (!(stable & SB_K_POWER) || !fire_keys(now))) {
+        fire_held = 0;                  /* Power let go (or the mode ended): the output off at once */
+        surv_fs_release();
+    }
+    if (fire_keys(now) || (t_power && fire_held)) {
+        /* 1.2-alpha30, the fire starter's page: Power short = Select, Power held 1 s = fire while held */
+        if (pressed & SB_K_POWER) {
+            t_power = now;
+            power_long_sent = 0;
+        }
+        if ((stable & SB_K_POWER) && t_power && !power_long_sent && now - t_power >= FIRE_KEY_MS) {
+            power_long_sent = 1;
+            fire_held = 1;
+            kin_push(KIN_FIRE, 0, 0);
+        }
+        if ((released & SB_K_POWER) && t_power) {
+            if (!power_long_sent)
+                kin_push(KIN_SELECT, 0, 0);
+            t_power = 0;
+        }
+        pressed &= ~SB_K_POWER;
+        released &= ~SB_K_POWER;
+        stable &= ~SB_K_POWER;          /* below: no screen-off, power menu or screenshot from Power */
+    }
     if (pressed & SB_K_POWER) {
         t_power = now;
         power_long_sent = 0;

@@ -30,6 +30,8 @@
 #define R_DTLS2 0xb5U
 #define R_CNFG00 0xb7U
 #define R_CNFG02 0xb9U
+#define R_CNFG11 0xc2U                      /* 1.2-alpha30: bits 6:0 VBYPSET, the boost's target (0 = 5.0 V, Samsung's
+                                             * init; the step is not documented: the S9 #2 override measures it) */
 #define R_CNFG06 0xbdU                      /* bits 3:2 CHGPROT: 0b11 unlocks writes to CNFG_01..03 (OTG_ILIM is in 02);
                                              * bits 1:0 WDTCLR (written 00 here: no watchdog effect) */
 #define MODE_OTG 0x0aU
@@ -199,11 +201,41 @@ static struct {
     uint32_t bursts, events;
     int refused;
     const char *why;
+    /* 1.2-alpha30: the fire starter (fire == 2; survival.h surv_fs_start) */
+    uint32_t fs_pulse_ms;
+    int fs_repeat, fs_ilim_code;            /* the mode; OTG_ILIM code 1 / 2 / 3 = 900 / 1200 / 1500 mA */
+    int fs_out, fs_n, fs_max;               /* the output on now (a pulse); pulses done; the most in this hold */
+    uint64_t t_phase, t_fs_temp, t_fs_log;  /* the pulse's (or the rest's) start; the last temperature read, log */
+    uint64_t fs_on_ms;                      /* the time on in this hold: the cooldown is 5 s + 3x it */
+    int fs_sum, fs_cnt, fs_peak, fs_vmin_cur, fs_sag_cur;   /* this pulse, as it runs */
+    int fs_avg, fs_peak_last, fs_w10, fs_vmin, fs_sag;      /* the last pulse, finished */
+    int fs_why;
+    /* 1.2-alpha30, S9 #2's override (the user's test phone, attended; docs/USB-FIRE-STARTER.md 5): 1 fast re-arm
+     * (the chip's limit or switch-off answered by switching OTG straight back on, not after its own 300 ms), 2 the
+     * same plus a higher boost target (VBYPSET); pulses <= 1 s. The battery pack, the fuel gauge, B2SOVRC and the
+     * PMIC's thermal shutdown stay as they are. */
+    int fs_ov, fs_vbyp;
+    /* run 1 (11-16): the gauge's VBYP (the boost's output, before the chip's OTG switch) and its input-current word,
+     * so a pulse's real volts are logged; the cell's power; the status lines a pulse logs (the ring is 16 KiB) */
+    int fs_vb_sum, fs_vb_cnt, fs_vb_last, fs_vb_mean, fs_cellw_sum, fs_cellw10, fs_iin_raw;
+    unsigned fs_stat_lines;
+    /* the steel-wool preset (fs_tol): the chip's own limit-and-retry (30 ms on, ~300 ms off) is let run, as designed;
+     * the port's band per reading for the load / chip split */
+    int fs_tol, fs_vmid_sum, fs_vmid_cnt, fs_vmid, fs_load_w10, fs_chip_w10;
+    uint8_t cnfg11;
+    int vbyp_written;
+    unsigned fs_rearms, fs_rearms_pulse, fs_btrips;
 } U;
 static struct sb_auth au;
 static void (*prev_before_reset)(void);
 
 static int chg_rd(uint8_t r, uint8_t *v) { return sb_chg_read(r, v); }
+/* CNFG_02 with OTG_ILIM at this session's step: the top one (1.5 A) except the fire starter's own choice */
+static uint8_t ilim_cnfg02(void)
+{
+    unsigned code = U.fire == 2 && U.fs_ilim_code >= 1 && U.fs_ilim_code <= 3 ? (unsigned)U.fs_ilim_code : 3U;
+    return (uint8_t)((U.cnfg02 & 0x3fU) | code << 6);
+}
 
 /* a tier-1 write of one charger register under its own authorisation (the hold-to-arm was its held step) */
 static int chg_wr(uint8_t reg, uint8_t val)
@@ -266,6 +298,19 @@ static int therm_c10(unsigned ch)
 #define FIRE_SAG_MV 3200                    /* the battery under load: 3 readings (300 ms) below it stop */
 #define FIRE_REARM_MS 2000U                 /* the chip dropped OTG by itself: rest, then once more (3 at most) */
 #define FIRE_DUTY_ON_MS 2000U               /* warm: 2 s on, 2 s off */
+/* 1.2-alpha30: the fire starter (survival.h surv_fs_start; docs/USB-FIRE-STARTER.md) */
+#define FS_TICK_MS 20U                      /* every check 50 times a second while a hold runs */
+#define FS_CONN_STOP_C10 600                /* stricter than the other modes: the USB connector 60 C, */
+#define FS_CHG_STOP_C10 650                 /* the charger 65 C, the battery 45 C (SURV_FS_BAT_STOP_C10) */
+#define FS_VBUS_GRACE_MS 100U               /* the port's reading settles after the boost starts */
+#define FS_EST_FROM_MS 200U                 /* the fuel gauge's current lags: the mean from 200 ms into a pulse */
+#define FS_COOL_BASE_MS 5000U
+#define FS_COOL_MAX_MS 60000U
+#define FS_COOL_FAULT_MS 30000U
+static void fs_pulse_begin(void);
+static void fs_keep(const char *line);
+static void fs_pulse_end(void);
+static void fs_tick(uint64_t now);
 
 /* 1.2-alpha29: OTG_ILIM (CNFG_02) only takes a write with CHGPROT unlocked (CNFG_06 bits 3:2 = 0b11; Samsung's
  * driver unlocks it at init and keeps it so; docs/USB-FIRE-RESEARCH.md 2). A write guard, not a protection: the
@@ -313,6 +358,14 @@ static void usb_back(void)
         return;
     int a = chg_wr(R_CNFG00, U.cnfg00);
     int b = chg_wr(R_CNFG02, U.cnfg02);
+    if (a && U.vbyp_written) {              /* the boost's target back first after the output is off */
+        if (chg_wr(R_CNFG11, U.cnfg11)) {
+            U.vbyp_written = 0;
+            sb_log("survival: fs: VBYPSET back as it was");
+        } else {
+            b = 0;
+        }
+    }
     if (a && b) {
         chgprot_back();                     /* after CNFG_02: the guard as it was */
         U.written = 0;
@@ -342,8 +395,19 @@ void surv_usb_stop(const char *why)
     U.why = fault ? why + 1 : why;
     ++U.events;
     U.state = SURV_USB_COOL;
-    U.t_cool = sb_ms() + (fault ? SURV_USB_COOL_FAULT_MS : U.fire ? FIRE_COOL_MS : SURV_USB_COOL_MS);
-    if (U.fire) {
+    if (U.fire == 2) {                      /* the fire starter: 5 s + 3x the time on, 30 s after a fault */
+        if (U.fs_out) {
+            U.fs_on_ms += sb_ms() - U.t_phase;
+            fs_pulse_end();
+        }
+        uint64_t c = fault ? FS_COOL_FAULT_MS : FS_COOL_BASE_MS + 3U * U.fs_on_ms;
+        U.t_cool = sb_ms() + (c > FS_COOL_MAX_MS ? FS_COOL_MAX_MS : c);
+        if (U.fs_why == SURV_FS_WHY_NONE)
+            U.fs_why = fault ? SURV_FS_WHY_FAULT : SURV_FS_WHY_STOP;
+    } else {
+        U.t_cool = sb_ms() + (fault ? SURV_USB_COOL_FAULT_MS : U.fire ? FIRE_COOL_MS : SURV_USB_COOL_MS);
+    }
+    if (U.fire == 1) {
         if (U.bright_was > 0)
             (void)panel_brightness(U.bright_was);
         struct ub v;
@@ -370,6 +434,7 @@ static int refuse(const char *why)
 {
     U.why = why;
     U.refused = 1;
+    U.fs_why = SURV_FS_WHY_REFUSED;
     ++U.events;
     if (U.written)
         kt_set(KT_SURV, KT_SURV_USB, sb_ms(), 100, 1);    /* the charger's old mode is retried every 100 ms */
@@ -385,8 +450,11 @@ static int usb_start(int fire)
         return U.fire == fire ? 0 : refuse("the other USB power mode is running: stop it first");
     if (U.written)
         return refuse("the charger is not back from the last burst yet");
-    if (U.state == SURV_USB_COOL && now < U.t_cool)
-        return refuse("cooling down after the last burst");
+    if (U.state == SURV_USB_COOL && now < U.t_cool) {
+        int r = refuse("cooling down after the last burst");
+        U.fs_why = SURV_FS_WHY_COOL;
+        return r;
+    }
     U.state = SURV_USB_OFF;
     if (saver_applied && !fire)
         return refuse("Extreme power saving (or Last 2 %) is on");
@@ -394,6 +462,11 @@ static int usb_start(int fire)
         return refuse("never in a self-test image");
     if (heater_running_ui())
         return refuse("Heat is running (both draw hard on the battery)");
+    if (fire == 2 && !kui_finger_down()) {  /* the fire starter fires only under a finger, never from the keys */
+        int r = refuse("keep a finger on the fire bar, or hold Power, until it fires");
+        U.fs_why = SURV_FS_WHY_FINGER;
+        return r;
+    }
     if (!sb_max_init())
         return refuse("the charger chip does not answer");
     if (input_present())
@@ -401,18 +474,20 @@ static int usb_start(int fire)
     struct sbos_battery b;
     battery_get(&b);
     U.bat_c10 = bat_temp_c10();
-    if (!b.ok || b.pct < (fire ? 1 : 5))
-        return refuse(fire ? "the battery is empty (below 1 %)" : "the battery is below 5 %");
-    if (b.mv && b.mv < (fire ? 3300 : 3500))
-        return refuse(fire ? "the battery is below 3.3 V" : "the battery is below 3.5 V");
+    if (!b.ok || b.pct < (fire == 1 ? 1 : 5))
+        return refuse(fire == 1 ? "the battery is empty (below 1 %)" : "the battery is below 5 %");
+    if (b.mv && b.mv < (fire == 1 ? 3300 : 3500))
+        return refuse(fire == 1 ? "the battery is below 3.3 V" : "the battery is below 3.5 V");
     U.usb_c10 = therm_c10(1);
     U.chg_c10 = therm_c10(3);
-    if (U.usb_c10 > -1000 && U.usb_c10 >= USB_CONN_STOP_C10 - WARM_MARGIN_C10)
+    if (U.usb_c10 > -1000 && U.usb_c10 >= (fire == 2 ? FS_CONN_STOP_C10 : USB_CONN_STOP_C10) - WARM_MARGIN_C10)
         return refuse("the USB connector is hot: let it cool");
-    if (U.chg_c10 > -1000 && U.chg_c10 >= CHG_STOP_C10 - WARM_MARGIN_C10)
+    if (U.chg_c10 > -1000 && U.chg_c10 >= (fire == 2 ? FS_CHG_STOP_C10 : CHG_STOP_C10) - WARM_MARGIN_C10)
         return refuse("the charger is hot: let it cool");
     if (U.bat_c10 <= -1000)
         return refuse("the battery temperature cannot be read");
+    if (fire == 2 && U.bat_c10 >= SURV_FS_BAT_START_C10)
+        return refuse("the battery is at 43 C or more: let it cool (the fire starter stops at 45 C)");
     if (U.bat_c10 >= limit_c10() - 20)
         return refuse("the battery is near its Survival limit: let it cool");
     if (!chg_rd(R_CNFG00, &U.cnfg00) || !chg_rd(R_CNFG02, &U.cnfg02))
@@ -430,11 +505,45 @@ static int usb_start(int fire)
     U.base_ma = n ? sum / n : 0;
     /* the chip's own top current limit, then the boost on */
     U.written = 1;                          /* from here every path writes both back */
+    U.fire = fire;                          /* ilim_cnfg02 reads it */
     (void)chgprot_unlock();
-    if (!chg_wr(R_CNFG02, (uint8_t)((U.cnfg02 & 0x3fU) | 0xc0U)))
-        sb_log("survival: usb out: OTG_ILIM 1.5 A did not read back (write-protected?): the chip's limit as it is");
+    if (!chg_wr(R_CNFG02, ilim_cnfg02()))
+        sb_log("survival: usb out: OTG_ILIM did not read back (write-protected?): the chip's limit as it is");
     uint8_t c2 = 0;
     U.ilim_ma = chg_rd(R_CNFG02, &c2) ? (int[]){ 500, 900, 1200, 1500 }[c2 >> 6] : -1;
+    if (fire == 2) {                        /* the charger's registers as they are (read only; CHG_INT 0xB0 skipped:
+                                             * clear-on-read) */
+        struct ub r;
+        ub_init(&r);
+        ub_s(&r, "survival: fs: charger 0xB1..0xC3:");
+        for (uint8_t a = 0xb1U; a <= 0xc3U; ++a) {
+            uint8_t v = 0;
+            ub_c(&r, ' ');
+            if (chg_rd(a, &v))
+                ub_hex(&r, v, 2);
+            else
+                ub_s(&r, "??");
+        }
+        sb_log(r.b);
+    }
+    if (fire == 2 && U.fs_ov == 2) {        /* S9 #2's override: a higher boost target */
+        uint8_t c11 = 0;
+        if (!chg_rd(R_CNFG11, &c11)) {
+            usb_back();
+            return refuse("the boost's voltage register cannot be read");
+        }
+        U.cnfg11 = c11;
+        U.vbyp_written = 1;
+        uint8_t want = (uint8_t)((c11 & 0x80U) | (U.fs_vbyp & 0x7f));
+        int ok = chg_wr(R_CNFG11, want);
+        struct ub v;
+        ub_init(&v);
+        ub_s(&v, "survival: fs: override: VBYPSET ");
+        ub_hex(&v, c11 & 0x7fU, 2);
+        ub_s(&v, ok ? " -> " : " -> (did NOT read back) ");
+        ub_hex(&v, want & 0x7fU, 2);
+        sb_log(v.b);
+    }
     if (!chg_wr(R_CNFG00, (uint8_t)((U.cnfg00 & ~0x0fU) | MODE_OTG))) {
         usb_back();
         return refuse("the charger did not take OTG mode");
@@ -450,7 +559,18 @@ static int usb_start(int fire)
     U.paused = 0;
     U.trips = U.resets = U.sag_ticks = 0;
     U.fire_min_left = -1;
-    if (fire) {                             /* everything else off so the battery's energy goes to the port */
+    if (fire == 2) {                        /* the fire starter: the first pulse starts now */
+        U.fs_out = 1;
+        U.t_phase = U.t_fs_temp = U.t_fs_log = now;
+        U.fs_n = 0;
+        U.fs_on_ms = 0;
+        U.fs_why = SURV_FS_WHY_NONE;
+        U.fs_avg = U.fs_peak_last = U.fs_w10 = 0;
+        U.fs_vmin = -1;
+        U.fs_sag = 0;
+        fs_pulse_begin();
+    }
+    if (fire == 1) {                        /* everything else off so the battery's energy goes to the port */
         if (wifi_on())
             (void)wifi_power(0);
         if (kmodem_on())
@@ -466,10 +586,10 @@ static int usb_start(int fire)
     U.est_ma = -1;
     U.why = 0;
     ++U.bursts;
-    kt_set(KT_SURV, KT_SURV_USB, now, 100, 1);
+    kt_set(KT_SURV, KT_SURV_USB, now, fire == 2 ? FS_TICK_MS : 100, 1);
     struct ub u;
     ub_init(&u);
-    ub_s(&u, "survival: usb out: ON (burst ");
+    ub_s(&u, fire == 2 ? "survival: fs: ON (fire starter " : "survival: usb out: ON (burst ");
     ub_dec(&u, U.bursts);
     ub_s(&u, ", OTG limit ");
     ub_dec(&u, (uint64_t)(U.ilim_ma > 0 ? U.ilim_ma : 0));
@@ -480,6 +600,17 @@ static int usb_start(int fire)
     ub_s(&u, " C, base ");
     ub_dec(&u, (uint64_t)(U.base_ma < 0 ? -U.base_ma : U.base_ma));
     ub_s(&u, " mA out of it)");
+    if (fire == 2) {
+        ub_s(&u, "; pulses of ");
+        ub_dec(&u, U.fs_pulse_ms);
+        ub_s(&u, U.fs_repeat ? " ms, repeated (at most " : " ms, once (");
+        ub_dec(&u, (uint64_t)U.fs_max);
+        ub_s(&u, "), USB connector ");
+        ub_dec(&u, (uint64_t)(U.usb_c10 > 0 ? U.usb_c10 / 10 : 0));
+        ub_s(&u, " C, charger ");
+        ub_dec(&u, (uint64_t)(U.chg_c10 > 0 ? U.chg_c10 / 10 : 0));
+        ub_s(&u, " C");
+    }
     sb_log(u.b);
     return 0;
 }
@@ -497,7 +628,7 @@ int surv_usb_fire_start(void)
 
 void surv_usb_hold(void)
 {
-    if (U.state == SURV_USB_ON && U.fire) {
+    if (U.state == SURV_USB_ON && U.fire == 1) {
         U.t_hold = sb_ms();
         power_input();                      /* the finger on the screen: it stays on */
     }
@@ -520,13 +651,406 @@ static void fire_pause(uint64_t ms, const char *why)
 
 static int fire_resume(void)
 {
-    if (!chg_wr(R_CNFG02, (uint8_t)((U.cnfg02 & 0x3fU) | 0xc0U)))
+    if (!chg_wr(R_CNFG02, ilim_cnfg02()))
         sb_log("survival: fire: OTG_ILIM did not read back on the re-arm (the chip's limit as it is)");
     if (!chg_wr(R_CNFG00, (uint8_t)((U.cnfg00 & ~0x0fU) | MODE_OTG)))
         return 0;
     U.paused = 0;
     U.t_duty = sb_ms();
     return 1;
+}
+
+/* ---- 1.2-alpha30: the fire starter ------------------------------------------------------------------------ */
+static void fs_stop(int code, const char *why)
+{
+    U.fs_why = code;
+    surv_usb_stop(why);
+}
+
+static void fs_pulse_begin(void)
+{
+    U.fs_rearms_pulse = 0;
+    U.fs_vb_sum = U.fs_vb_cnt = U.fs_cellw_sum = 0;
+    U.fs_vmid_sum = U.fs_vmid_cnt = 0;
+    U.fs_stat_lines = 0;
+    U.fs_sum = U.fs_cnt = U.fs_peak = 0;
+    U.fs_vmin_cur = 99;
+    U.fs_sag_cur = 99999;
+}
+
+/* a pulse ended (its time, a stop or a fault): its figures become "the last pulse" and go to the log */
+static void fs_pulse_end(void)
+{
+    U.fs_out = 0;
+    U.fs_avg = U.fs_cnt ? U.fs_sum / U.fs_cnt : -1;
+    U.fs_peak_last = U.fs_cnt ? U.fs_peak : -1;
+    U.fs_vb_mean = U.fs_vb_cnt ? U.fs_vb_sum / U.fs_vb_cnt : -1;
+    U.fs_cellw10 = U.fs_cnt ? U.fs_cellw_sum / U.fs_cnt : 0;
+    /* W out of the boost (mA x VBYP); the lead gets that minus the chip's switch drop (VBYP - VBUS) x I */
+    U.fs_w10 = U.fs_avg > 0 ? (int)((int64_t)U.fs_avg * (U.fs_vb_mean > 3000 ? U.fs_vb_mean : 5100) / 100000) : 0;
+    /* the split: into the load mA x the port's voltage (the middle of its 1 V band; below 3.5 V counted as 1.75 V),
+     * the rest of the boost's output lost in the chip's OTG switch */
+    U.fs_vmid = U.fs_vmid_cnt ? U.fs_vmid_sum / U.fs_vmid_cnt : -1;
+    U.fs_load_w10 = U.fs_avg > 0 && U.fs_vmid > 0 ? (int)((int64_t)U.fs_avg * U.fs_vmid / 100000) : 0;
+    U.fs_chip_w10 = U.fs_w10 > U.fs_load_w10 ? U.fs_w10 - U.fs_load_w10 : 0;
+    U.fs_vmin = U.fs_vmin_cur == 99 ? -1 : U.fs_vmin_cur;
+    U.fs_sag = U.fs_sag_cur == 99999 ? 0 : U.fs_sag_cur;
+    ++U.fs_n;
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "survival: fs: pulse ");
+    ub_dec(&u, (uint64_t)U.fs_n);
+    ub_s(&u, " (limit ");
+    ub_dec(&u, (uint64_t)(U.ilim_ma > 0 ? U.ilim_ma : 0));
+    ub_s(&u, " mA, ");
+    ub_dec(&u, (sb_ms() - U.t_phase));
+    ub_s(&u, " ms): mean ");
+    ub_dec(&u, (uint64_t)(U.fs_avg > 0 ? U.fs_avg : 0));
+    ub_s(&u, " mA, peak ");
+    ub_dec(&u, (uint64_t)(U.fs_peak_last > 0 ? U.fs_peak_last : 0));
+    ub_s(&u, " mA out of the port (");
+    ub_dec(&u, (uint64_t)U.fs_cnt);
+    ub_s(&u, " readings), about ");
+    ub_dec(&u, (uint64_t)(U.fs_w10 / 10));
+    ub_c(&u, '.');
+    ub_dec(&u, (uint64_t)(U.fs_w10 % 10));
+    ub_s(&u, " W out of the boost (VBYP mean ");
+    ub_dec(&u, (uint64_t)(U.fs_vb_mean > 0 ? U.fs_vb_mean : 0));
+    ub_s(&u, " mV), ");
+    ub_dec(&u, (uint64_t)(U.fs_cellw10 / 10));
+    ub_c(&u, '.');
+    ub_dec(&u, (uint64_t)(U.fs_cellw10 % 10));
+    ub_s(&u, " W from the cell; into the load about ");
+    ub_dec(&u, (uint64_t)(U.fs_load_w10 / 10));
+    ub_c(&u, '.');
+    ub_dec(&u, (uint64_t)(U.fs_load_w10 % 10));
+    ub_s(&u, " W, lost in the chip's switch about ");
+    ub_dec(&u, (uint64_t)(U.fs_chip_w10 / 10));
+    ub_c(&u, '.');
+    ub_dec(&u, (uint64_t)(U.fs_chip_w10 % 10));
+    ub_s(&u, " W (port band middle ");
+    ub_dec(&u, (uint64_t)(U.fs_vmid > 0 ? U.fs_vmid : 0));
+    ub_s(&u, " mV); VBUS code low ");
+    ub_dec(&u, (uint64_t)(U.fs_vmin < 0 ? 99 : U.fs_vmin));
+    ub_s(&u, "; battery low ");
+    ub_dec(&u, (uint64_t)U.fs_sag);
+    ub_s(&u, " mV, ");
+    ub_dec(&u, (uint64_t)(U.bat_c10 > 0 ? U.bat_c10 / 10 : 0));
+    ub_c(&u, '.');
+    ub_dec(&u, (uint64_t)(U.bat_c10 > 0 ? U.bat_c10 % 10 : 0));
+    ub_s(&u, " C; BYP_DTLS ");
+    ub_hex(&u, U.byp, 1);
+    if (U.fs_tol) {
+        ub_s(&u, "; steel wool (the chip's own retry), limit events ");
+        ub_dec(&u, U.trips);
+    }
+    if (U.fs_ov) {
+        ub_s(&u, "; override ");
+        ub_dec(&u, (uint64_t)U.fs_ov);
+        ub_s(&u, ", re-arms ");
+        ub_dec(&u, U.fs_rearms_pulse);
+        ub_s(&u, ", limit events ");
+        ub_dec(&u, U.trips);
+        ub_s(&u, ", boost-limit events ");
+        ub_dec(&u, U.fs_btrips);
+    }
+    sb_log(u.b);
+    fs_keep(u.b);
+}
+
+static int fs_on(void)
+{
+    if (!chg_wr(R_CNFG02, ilim_cnfg02()))
+        sb_log("survival: fs: OTG_ILIM did not read back (the chip's limit as it is)");
+    if (!chg_wr(R_CNFG00, (uint8_t)((U.cnfg00 & ~0x0fU) | MODE_OTG)))
+        return 0;
+    U.fs_out = 1;
+    U.t_phase = sb_ms();
+    fs_pulse_begin();
+    return 1;
+}
+
+static uint32_t fs_gap_ms(void) { return U.fs_pulse_ms > 1000U ? U.fs_pulse_ms : 1000U; }   /* 3 / 5 s: as long */
+
+void surv_fs_release(void)
+{
+    if (U.state == SURV_USB_ON && U.fire == 2)
+        fs_stop(SURV_FS_WHY_RELEASED, "released");
+}
+
+int surv_fs_start(uint32_t pulse_ms, int repeat, int ilim_ma)
+{
+    return surv_fs_start_ov(pulse_ms, repeat, ilim_ma, 0, 0);
+}
+
+int surv_fs_start_ov(uint32_t pulse_ms, int repeat, int ilim_ma, int ov, int vbyp)
+{
+    return surv_fs_start_x(pulse_ms, repeat, ilim_ma, ov, vbyp, 0);
+}
+
+int surv_fs_start_x(uint32_t pulse_ms, int repeat, int ilim_ma, int ov, int vbyp, int tol)
+{
+    if (tol && ov)
+        return refuse("the steel-wool preset runs without the override");
+    if (ov < 0 || ov > 2 || vbyp < 0 || vbyp > 0x7f)
+        return refuse("the override's settings are out of range");
+    if (ov && pulse_ms > SURV_FS_OV_MAX_MS)
+        pulse_ms = SURV_FS_OV_MAX_MS;       /* overridden pulses: 1 s at most */
+    if (pulse_ms != 500U && pulse_ms != 1000U && pulse_ms != 2000U && pulse_ms != 3000U && pulse_ms != 5000U &&
+        !(ov && pulse_ms == SURV_FS_OV_MAX_MS))
+        return refuse("the fire starter's pulse is 0.5, 1, 2, 3 or 5 s");
+    if (ilim_ma != 900 && ilim_ma != 1200 && ilim_ma != 1500)
+        return refuse("the fire starter's limit is 0.9, 1.2 or 1.5 A");
+    if (U.state == SURV_USB_ON)
+        return U.fire == 2 ? 0 : refuse("the other USB power mode is running: stop it first");
+    U.fs_pulse_ms = pulse_ms;
+    U.fs_repeat = repeat != 0;
+    U.fs_max = repeat ? SURV_FS_MAX_PULSES : 1;
+    U.fs_ilim_code = ilim_ma == 900 ? 1 : ilim_ma == 1200 ? 2 : 3;
+    U.fs_ov = ov;
+    U.fs_vbyp = vbyp;
+    U.fs_tol = tol != 0;
+    U.fs_rearms = U.fs_btrips = 0;
+    return usb_start(2);
+}
+
+/* run 1 (11-16): the pmsg ring kept only the last two pulses: every pulse's summary also goes into the blob
+ * "fslog" (the state slot, saved 3 s later; the newest ~6 KiB, whole lines) */
+static char fslog[6144];
+static uint32_t fslog_n;
+static void fs_keep(const char *line)
+{
+    uint32_t n = (uint32_t)strlen(line) + 1U;
+    if (n >= sizeof(fslog))
+        return;
+    while (fslog_n + n > sizeof(fslog)) {   /* drop the oldest line */
+        uint32_t k = 0;
+        while (k < fslog_n && fslog[k] != '\n')
+            ++k;
+        k = k < fslog_n ? k + 1U : fslog_n;
+        memmove(fslog, fslog + k, fslog_n - k);
+        fslog_n -= k;
+    }
+    memcpy(fslog + fslog_n, line, n - 1U);
+    fslog[fslog_n + n - 1U] = '\n';
+    fslog_n += n;
+    if (prefs_blob_put("fslog", fslog, fslog_n) >= 0)
+        settings_changed_soon(3000);
+}
+
+/* S9 #2's override: OTG off and straight back on (the chip's own rest is ~300 ms). 1 on again, 0 failed */
+static int fs_rearm(const char *what)
+{
+    ++U.fs_rearms;
+    if (++U.fs_rearms_pulse <= 3U || U.fs_rearms_pulse % 10U == 0U) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "survival: fs: override: re-arm ");
+        ub_dec(&u, U.fs_rearms_pulse);
+        ub_s(&u, " in this pulse after ");
+        ub_s(&u, what);
+        ub_s(&u, " at +");
+        ub_dec(&u, sb_ms() - U.t_phase);
+        ub_s(&u, " ms");
+        sb_log(u.b);
+    }
+    if (!chg_wr(R_CNFG00, U.cnfg00))
+        return 0;
+    return chg_wr(R_CNFG00, (uint8_t)((U.cnfg00 & ~0x0fU) | MODE_OTG));
+}
+
+/* every 20 ms while a hold runs: a pulse's checks, its end, the rest between pulses */
+static void fs_tick(uint64_t now)
+{
+    if (!kui_finger_down()) {               /* ui.c calls surv_fs_release at the lift; this is the backstop */
+        fs_stop(SURV_FS_WHY_RELEASED, "released");
+        return;
+    }
+    if (!K.screen_on) {
+        fs_stop(SURV_FS_WHY_RELEASED, "the screen went off");
+        return;
+    }
+    uint64_t in = now - U.t_phase;
+    if (!U.fs_out) {                        /* resting between pulses: the output is off */
+        if (in < fs_gap_ms())
+            return;
+        if (!fs_on()) {
+            fs_stop(SURV_FS_WHY_FAULT, "!the charger did not take OTG mode again");
+            return;
+        }
+        return;
+    }
+    uint8_t c0 = 0, d0 = 0, d1 = 0, d2 = 0;
+    if (!(chg_rd(R_CNFG00, &c0) && chg_rd(R_DTLS0, &d0) && chg_rd(R_DTLS1, &d1) && chg_rd(R_DTLS2, &d2))) {
+        fs_stop(SURV_FS_WHY_FAULT, "!the charger chip stopped answering");
+        return;
+    }
+    if (((d2 & 0x0fU) != U.byp || (d1 & 0x7fU) != U.chg) && ++U.fs_stat_lines <= 4U) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "survival: fs: the chip's status: BYP_DTLS ");
+        ub_hex(&u, d2 & 0x0fU, 1);
+        ub_s(&u, " CHG_DTLS ");
+        ub_hex(&u, d1 & 0x0fU, 1);
+        ub_s(&u, " BAT_DTLS ");
+        ub_hex(&u, (d1 >> 4) & 7U, 1);
+        ub_s(&u, " CHGIN_DTLS ");
+        ub_hex(&u, (d0 >> 5) & 3U, 1);
+        ub_s(&u, " at ");
+        ub_dec(&u, in);
+        ub_s(&u, " ms");
+        sb_log(u.b);
+    }
+    U.byp = d2 & 0x0fU;
+    U.chg = d1 & 0x7fU;
+    if (U.byp & 1U) {                       /* OTGILIM: the chip's output switch at its current limit */
+        ++U.trips;
+        if (!U.fs_ov && !U.fs_tol) {
+            fs_stop(SURV_FS_WHY_ILIM, "!the chip hit its current limit: the lead draws too much, move the contacts "
+                                      "apart (or pick a higher limit)");
+            return;
+        }
+    }
+    if (U.byp & 0x0eU) {                    /* the boost's own limit, or a flag we do not know: off */
+        if (U.byp & 2U)
+            ++U.fs_btrips;
+        if (!U.fs_ov && !(U.fs_tol && (U.byp & 0x0eU) == 2U)) {
+            fs_stop(SURV_FS_WHY_FAULT, U.byp & 2U ? "!the chip's boost hit its current limit" :
+                                                    "!the chip flagged its OTG path (BYP_DTLS)");
+            return;
+        }
+    }
+    if ((U.chg & 0x0fU) == 0x0aU) {
+        fs_stop(SURV_FS_WHY_HOT, "!the charger chip shut down from heat (its own protection)");
+        return;
+    }
+    if (((U.chg >> 4) & 7U) == 6U) {
+        fs_stop(SURV_FS_WHY_FAULT, "!the chip flagged battery overcurrent");
+        return;
+    }
+    if ((c0 & 0x0fU) != MODE_OTG && !U.fs_ov) {
+        fs_stop(SURV_FS_WHY_FAULT, "!the charger switched its output off by itself (its protection)");
+        return;
+    }
+    if (U.fs_ov && ((U.byp & 0x0fU) || (c0 & 0x0fU) != MODE_OTG)) {
+        if (U.fs_rearms_pulse >= SURV_FS_OV_MAX_REARMS) {
+            fs_stop(SURV_FS_WHY_FAULT, "!override: 50 re-arms in one pulse: off (a dead short?)");
+            return;
+        }
+        if (!fs_rearm((c0 & 0x0fU) != MODE_OTG ? "the chip switched OTG off" :
+                      (U.byp & 1U) ? "its current limit" : "its boost limit")) {
+            fs_stop(SURV_FS_WHY_FAULT, "!override: the charger did not take OTG mode again");
+            return;
+        }
+    }
+    vbus_read();
+    int code = U.vhi < 0 ? -1 : (U.vhi - 3500) / 1000;
+    if (in >= FS_VBUS_GRACE_MS && code >= 0) {
+        if (code < U.fs_vmin_cur)
+            U.fs_vmin_cur = code;
+        int vmid = code == 0 ? 1750 : 3000 + 1000 * code;
+        U.fs_vmid_sum += vmid;
+        ++U.fs_vmid_cnt;
+        if (code == 0 && !U.fs_ov && !U.fs_tol) {   /* below 3.5 V: collapsed (the override / steel wool expect dips) */
+            fs_stop(SURV_FS_WHY_VBUS, "!the port's voltage collapsed below 3.5 V: off");
+            return;
+        }
+    }
+    if (sb_bat_fast(&U.mv, &U.ma)) {
+        if (U.mv && U.mv < U.fs_sag_cur)
+            U.fs_sag_cur = U.mv;
+        if (U.mv && U.mv < 3300) {
+            fs_stop(SURV_FS_WHY_LOWBAT, "!the battery dropped below 3.3 V");
+            return;
+        }
+        uint16_t w = 0;
+        if (sb_fg_word(0xb3U, &w)) {        /* the gauge's VBYP, ~0.427 mV a step (charge.c FG_VBYP) */
+            U.fs_vb_last = (int)((uint32_t)w * 427U / 1000U);
+            if (in >= FS_VBUS_GRACE_MS && U.fs_vb_last > 1000) {
+                U.fs_vb_sum += U.fs_vb_last;
+                ++U.fs_vb_cnt;
+            }
+        }
+        if (sb_fg_word(0xb4U, &w))          /* the gauge's input-current word, raw (its meaning in OTG: logged) */
+            U.fs_iin_raw = w;
+        if (U.have_base && in >= FS_EST_FROM_MS) {
+            int extra = U.base_ma - U.ma;
+            int vb = U.fs_vb_last > 3000 ? U.fs_vb_last : 5100;
+            int est = extra > 0 ? (int)((int64_t)extra * U.mv / vb * 85 / 100) : 0;
+            U.est_ma = est;
+            U.fs_sum += est;
+            U.fs_cellw_sum += extra > 0 ? (int)((int64_t)extra * U.mv / 100000) : 0;   /* 0.1 W from the cell */
+            ++U.fs_cnt;
+            if (est > U.fs_peak)
+                U.fs_peak = est;
+        }
+    }
+    if (now - U.t_fs_temp >= 200U) {        /* five times a second: the temperatures and the charge */
+        U.t_fs_temp = now;
+        U.bat_c10 = bat_temp_c10();
+        U.usb_c10 = therm_c10(1);
+        U.chg_c10 = therm_c10(3);
+        if (U.bat_c10 <= -1000 || U.bat_c10 >= SURV_FS_BAT_STOP_C10) {
+            fs_stop(SURV_FS_WHY_HOT, "!the battery reached 45 C (or cannot be read)");
+            return;
+        }
+        if (U.usb_c10 > -1000 && U.usb_c10 >= FS_CONN_STOP_C10) {
+            fs_stop(SURV_FS_WHY_HOT, "!the USB connector reached 60 C");
+            return;
+        }
+        if (U.chg_c10 > -1000 && U.chg_c10 >= FS_CHG_STOP_C10) {
+            fs_stop(SURV_FS_WHY_HOT, "!the charger reached 65 C");
+            return;
+        }
+        struct sbos_battery b;
+        battery_get(&b);
+        if (b.ok && b.pct < 3) {
+            fs_stop(SURV_FS_WHY_LOWBAT, "!the battery is at 3 %");
+            return;
+        }
+    }
+    if (now - U.t_fs_log >= 250U) {         /* the ladder's trace: four lines a second while the output is on */
+        U.t_fs_log = now;
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "survival: fs: p");
+        ub_dec(&u, (uint64_t)U.fs_n + 1U);
+        ub_s(&u, " +");
+        ub_dec(&u, in);
+        ub_s(&u, " ms: VBUS code ");
+        ub_dec(&u, (uint64_t)(code < 0 ? 99 : code));
+        ub_s(&u, ", battery ");
+        ub_dec(&u, (uint64_t)U.mv);
+        ub_s(&u, " mV ");
+        ub_dec(&u, (uint64_t)(U.ma < 0 ? -U.ma : U.ma));
+        ub_s(&u, U.ma < 0 ? " mA out, about " : " mA in, about ");
+        ub_dec(&u, (uint64_t)(U.est_ma < 0 ? 0 : U.est_ma));
+        ub_s(&u, " mA at the port; VBYP ");
+        ub_dec(&u, (uint64_t)(U.fs_vb_last > 0 ? U.fs_vb_last : 0));
+        ub_s(&u, " mV, IIN word ");
+        ub_hex(&u, (uint64_t)U.fs_iin_raw, 4);
+        ub_s(&u, "; ");
+        ub_dec(&u, (uint64_t)(U.bat_c10 > 0 ? U.bat_c10 : 0));
+        ub_s(&u, " / ");
+        ub_dec(&u, (uint64_t)(U.usb_c10 > 0 ? U.usb_c10 : 0));
+        ub_s(&u, " / ");
+        ub_dec(&u, (uint64_t)(U.chg_c10 > 0 ? U.chg_c10 : 0));
+        ub_s(&u, " dC");
+        sb_log(u.b);
+    }
+    if (in >= U.fs_pulse_ms) {              /* the pulse is over: the output off */
+        if (!chg_wr(R_CNFG00, U.cnfg00)) {
+            fs_stop(SURV_FS_WHY_FAULT, "!the charger did not take its old mode at the pulse's end");
+            return;
+        }
+        U.fs_on_ms += in;
+        fs_pulse_end();
+        if (U.fs_n >= U.fs_max) {
+            fs_stop(SURV_FS_WHY_DONE, U.fs_max > 1 ? "every pulse of this hold done" : "the pulse is done");
+            return;
+        }
+        U.t_phase = now;                    /* the rest between pulses */
+    }
 }
 
 static void usb_tick(void)
@@ -539,6 +1063,10 @@ static void usb_tick(void)
             U.state = SURV_USB_OFF;
             kt_cancel(KT_SURV, KT_SURV_USB);
         }
+        return;
+    }
+    if (U.fire == 2) {
+        fs_tick(now);
         return;
     }
     if (!U.fire && now - U.t_on >= SURV_USB_BURST_MS) {
@@ -723,7 +1251,26 @@ void surv_usb_status(struct surv_usb *s)
     s->paused = U.state == SURV_USB_ON && U.paused;
     s->usb_c10 = U.usb_c10;
     s->chg_c10 = U.chg_c10;
-    s->fire_min_left = U.state == SURV_USB_ON && U.fire ? U.fire_min_left : -1;
+    s->fire_min_left = U.state == SURV_USB_ON && U.fire == 1 ? U.fire_min_left : -1;
+    s->fs_pulse_ms = (int32_t)U.fs_pulse_ms;
+    s->fs_repeat = U.fs_repeat;
+    s->fs_n = U.fs_n;
+    s->fs_max = U.fs_max;
+    s->fs_out = U.state == SURV_USB_ON && U.fire == 2 && U.fs_out;
+    s->fs_avg_ma = U.fs_avg;
+    s->fs_peak_ma = U.fs_peak_last;
+    s->fs_w10 = U.fs_w10;
+    s->fs_vmin = U.fs_vmin;
+    s->fs_sag_mv = U.fs_sag;
+    s->fs_why = U.fs_why;
+    s->fs_vbyp_mv = U.fs_vb_mean;
+    s->fs_cellw10 = U.fs_cellw10;
+    s->fs_load_w10 = U.fs_load_w10;
+    s->fs_chip_w10 = U.fs_chip_w10;
+    if (U.state == SURV_USB_ON && U.fire == 2) {   /* the time left of this pulse, or of the rest before the next */
+        uint64_t in = now - U.t_phase, len = U.fs_out ? U.fs_pulse_ms : fs_gap_ms();
+        s->ms_left = in < len ? (int32_t)(len - in) : 0;
+    }
 }
 
 /* ---- the emergency card: the Info app's state ("CRD2"; "CRD1" had the first six fields) --------------------- */
@@ -1085,6 +1632,14 @@ void surv_init(void)
     U.bat_c10 = -1000;
     prev_before_reset = sb_before_reset;
     sb_before_reset = before_reset;
+    /* 1.2-alpha30: a restart in the middle of an S9 #2 override (a crash: before_reset did not run) must not leave
+     * the boost's target raised: VBYPSET back to Samsung's 0 (5.0 V) if it is not. Nothing is written otherwise. */
+    uint8_t c11 = 0;
+    if (sb_max_init() && chg_rd(R_CNFG11, &c11) && (c11 & 0x7fU) != 0) {
+        int ok = chg_wr(R_CNFG11, (uint8_t)(c11 & 0x80U));
+        sb_log(ok ? "survival: fs: VBYPSET was raised at the start (a crash in an override?): back to 5.0 V" :
+                    "survival: fs: VBYPSET was raised at the start and did NOT go back");
+    }
 }
 
 void surv_timer(unsigned id)

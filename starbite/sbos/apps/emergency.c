@@ -4,7 +4,11 @@
  * 1.0: the alarm (the kernel's SOS service) and the medical card. Calls and messages come with the modem driver.
  * 1.2-alpha27 (kern/survival.c): USB power out (5 V from the USB-C port, hold to arm, 10 s bursts), SOS options
  * (Morse on the torch and the motor, the screen beacon), sunrise and sunset for a typed-in location, Last 2 % mode,
- * and the compass / level's status (they need the sensor hub driver). Nothing here can call or send. */
+ * and the compass / level's status (they need the sensor hub driver). Nothing here can call or send.
+ * 1.2-alpha30: Fire starter (docs/USB-FIRE-STARTER.md): 0.5 / 1 / 2 s pulses of 5 V for a pencil lead, once or
+ * repeated, at the chip's 0.9 / 1.2 / 1.5 A step; armed by a switch, fired by a hold that keeps firing only while the
+ * finger stays down (the kernel cuts it at the lift), with the last pulse's current, watts, port voltage and the
+ * battery's temperature. */
 #include "sbapp.h"
 #include "sbfmt.h"
 
@@ -15,7 +19,7 @@ SBAPP_DEFINE("emergency", "Emergency", SBOS_P_ALARM | SBOS_P_LIGHT, 0xffff453aU,
 #define ORANGE 0xffff9f0aU
 #define GREEN 0xff30d158U
 
-enum { P_MAIN, P_USB, P_SOS, P_SUN, P_LAST2, P_COMPASS, P_LIGHT };
+enum { P_MAIN, P_USB, P_SOS, P_SUN, P_LAST2, P_COMPASS, P_LIGHT, P_FIRE };
 static int page;
 static int loc_field;                       /* 1 latitude, 2 longitude being typed */
 static int whistle_k;                       /* 1.2-alpha29: the whistle's 3 blasts (1 s on, 0.5 s off): the step */
@@ -307,6 +311,156 @@ static void show_compass(void)
     }
 }
 
+/* ---- 1.2-alpha30: Fire starter. One fixed layout (the same elements in the same order in every state), so the
+ * 5-a-second redraw never moves the hold under the finger. ---- */
+static int fs_pulse = 1, fs_rep, fs_lim = 2, fs_armed;     /* 1 s, single, 1.5 A; the arming switch (this visit) */
+static int fs_ov, fs_vb = 1, fs_wool;      /* fs_wool: the steel-wool preset (3 s, single, 1.5 A, no override) */
+static const int fs_vb_code[4] = { 5, 10, 25, 50 };
+
+static const char *fs_why_text(int why, uint32_t *c)
+{
+    *c = ORANGE;
+    switch (why) {
+    case FS_WHY_DONE: *c = GREEN; return "Done. Hold again for more (after the cooldown).";
+    case FS_WHY_RELEASED: *c = GREY; return "Stopped: you lifted your finger.";
+    case FS_WHY_ILIM: return "Stopped: the lead drew more than the limit. Move the wires 5 mm further apart "
+                             "(or pick a higher limit).";
+    case FS_WHY_VBUS: return "Stopped: the port's voltage collapsed. Check the two wires are not touching.";
+    case FS_WHY_FAULT: return "Stopped: the charger chip flagged a fault (details in the notifications).";
+    case FS_WHY_HOT: return "Stopped: too hot (battery 45 \xc2\xb0" "C, or the connector / charger). Let it cool.";
+    case FS_WHY_LOWBAT: return "Stopped: the battery is too low.";
+    case FS_WHY_STOP: *c = GREY; return "Stopped.";
+    case FS_WHY_REFUSED: return "Did not start: the reason is in the notifications.";
+    case FS_WHY_COOL: return "Not yet: it is cooling down (see the countdown).";
+    case FS_WHY_FINGER: return "Did not start: keep your finger on the bar (or Power held) until it fires.";
+    default: *c = GREY; return "Ready when armed.";
+    }
+}
+
+static void show_fire(void)
+{
+    int st = setting_get(SET_SURV_FS), info = setting_get(SET_SURV_FS_INFO), last = setting_get(SET_SURV_FS_LAST);
+    int w = setting_get(SET_SURV_FS_W10);
+    int n = info & 0xf, mx = (info >> 4) & 0xf, out = (info >> 8) & 1, why = (info >> 9) & 0x1f;
+    int left = (info >> 14) & 0xff, c10 = (info >> 22) & 0x3ff;
+    int avg = last & 0xfff, peak = (last >> 12) & 0xfff, vmin = (last >> 24) & 0xf;
+    int w10 = w & 0xff, sag = (w >> 8) & 0xffff;
+    struct fmt f;
+    uint32_t col;
+    ui_title("Fire starter");
+    fmt_init(&f);
+    if (st == 1 && out) {
+        fmt_s(&f, "FIRING ");
+        fmt_d(&f, n + 1);
+        fmt_s(&f, "/");
+        fmt_d(&f, mx);
+        fmt_s(&f, "  ");
+        dec1(&f, left);
+        fmt_s(&f, " s");
+        ui_big("KEEP HOLDING - LIFT TO STOP", f.b, RED);
+    } else if (st == 1) {
+        fmt_s(&f, "Rest ");
+        dec1(&f, left);
+        fmt_s(&f, " s");
+        ui_big("KEEP HOLDING FOR THE NEXT PULSE", f.b, ORANGE);
+    } else if (st == 2) {
+        fmt_s(&f, "Cooling ");
+        fmt_d(&f, (left + 9) / 10);
+        fmt_s(&f, " s");
+        ui_big("WAIT", f.b, ORANGE);
+    } else {
+        ui_big(fs_armed ? "ARMED" : "SAFE", fs_armed ? "Hold the red bar" : "Switch on to arm", fs_armed ? RED : GREEN);
+    }
+    ui_toggle(53, "Arm: lead wired, tinder on it, over stone, hands on insulated parts only", fs_armed);
+    ui_hold(54, fs_armed ? "HOLD TO FIRE: 1 s to start, it fires while you keep holding" :
+                           "Arm first (the switch above)", 1000, UI_RED);
+    /* (Power held 1 s fires too: SET_SURV_FS_KEYS) */
+    ui_textline(fs_why_text(why, &col), col);
+    fmt_init(&f);
+    if (avg != 0xfff) {
+        fmt_s(&f, "Last pulse: about ");
+        fmt_d(&f, avg);
+        fmt_s(&f, " mA, ");
+        dec1(&f, w10);
+        fmt_s(&f, " W (peak ");
+        fmt_d(&f, peak == 0xfff ? 0 : peak);
+        fmt_s(&f, " mA)");
+    } else {
+        fmt_s(&f, "Last pulse: no reading yet (pulses under 0.2 s show none)");
+    }
+    ui_textline(f.b, 0xffffffffU);
+    fmt_init(&f);
+    fmt_s(&f, "Port: ");
+    fmt_s(&f, vmin == 0xf ? "not read yet" : vmin == 0 ? "COLLAPSED below 3.5 V" : vmin == 1 ? "sagged to 3.5-4.5 V" :
+                                                                                         "about 5 V (good)");
+    if (sag > 0) {
+        fmt_s(&f, "; battery low point ");
+        fmt_d(&f, sag);
+        fmt_s(&f, " mV");
+    }
+    ui_textline(f.b, vmin == 0 ? ORANGE : 0xffffffffU);
+    {
+        int vb = setting_get(SET_SURV_FS_VBYP), vmv = vb & 0xffff, cw = (vb >> 16) & 0x7fff;
+        fmt_init(&f);
+        fmt_s(&f, "Boost (inside the phone): ");
+        if (vmv > 0) {
+            dec1(&f, vmv / 100);
+            fmt_s(&f, " V; from the battery ");
+            dec1(&f, cw);
+            fmt_s(&f, " W");
+        } else {
+            fmt_s(&f, "not read yet");
+        }
+        ui_textline(f.b, 0xffffffffU);
+        int sp = setting_get(SET_SURV_FS_SPLIT), lw = sp & 0x7fff, cwl = (sp >> 16) & 0x7fff;
+        fmt_init(&f);
+        if (avg != 0xfff && (lw || cwl)) {
+            fmt_s(&f, "Into the lead about ");
+            dec1(&f, lw);
+            fmt_s(&f, " W, lost in the chip about ");
+            dec1(&f, cwl);
+            fmt_s(&f, " W");
+        } else {
+            fmt_s(&f, "Into the lead / in the chip: after the first pulse");
+        }
+        ui_textline(f.b, lw >= cwl ? GREEN : ORANGE);
+        if (vmin == 0 && avg != 0xfff)
+            ui_textline("Port under 3.5 V: the lead is too short / too conductive, the chip limits the current and "
+                        "burns the rest inside itself. Longer gap, or a thinner spot.", ORANGE);
+        else
+            ui_textline(" ", GREY);     /* the layout stays fixed */
+    }
+    fmt_init(&f);
+    fmt_s(&f, "Battery ");
+    if (c10 == 1023)
+        fmt_s(&f, "?");
+    else
+        dec1(&f, c10);
+    fmt_s(&f, " \xc2\xb0" "C (it stops at 45 \xc2\xb0" "C)");
+    ui_textline(f.b, c10 != 1023 && c10 >= 400 ? ORANGE : 0xffffffffU);
+    ui_toggle(57, "Steel wool preset: 3 s at 1.5 A, the chip's own retry, no override (ignores the choices below)",
+              fs_wool);
+    ui_textline("Pulse", GREY);
+    ui_level(50, "0.5|1|2|3|5 s", fs_pulse);
+    ui_textline("Pulses per hold", GREY);
+    ui_level(51, "Single|Repeat (up to 6)", fs_rep);
+    ui_textline("Current limit (the charger chip's own steps; 1.5 A is its top, it trips near 1.6 A)", GREY);
+    ui_level(52, "0.9 A|1.2 A|1.5 A", fs_lim);
+    ui_textline("Override (test phone S9 #2 only; pulses 1 s at most; risks the charger chip)", ORANGE);
+    ui_level(55, "Off|Fast re-arm|Re-arm + boost V", fs_ov);
+    ui_textline("Boost voltage code (VBYPSET; 0 = 5.0 V, the step is being measured)", GREY);
+    ui_level(56, "5|10|25|50", fs_vb);
+    ui_textline("Keys: Volume Up / Down move, Power short selects (Arm, the choices), hold Power 1 s to fire: it fires "
+                "while Power stays down. Bixby held = back.", 0xffffffffU);
+    ui_textline("Wire: 0.5 mm pencil lead, each bare wire wrapped 3-4 tight turns round it, 5-7 cm apart to start. "
+                "Tinder (toilet paper) loosely round the middle.", 0xffffffffU);
+    ui_textline("Tune: 'drew more than the limit' = wires 5 mm apart. Under ~1000 mA and no glow = 5 mm closer. Aim "
+                "for the most mA that does not stop it.", 0xffffffffU);
+    ui_textline("Lift your finger to stop at once. It also stops on any chip fault, a collapsed port, a 45 \xc2\xb0"
+                "C battery or a low battery, then cools down (5 s + 3x the time on).", GREY);
+    ui_textline("Unplug any charger first. Never short the port. Over stone or soil, water ready.", ORANGE);
+}
+
 static void show(void)
 {
     ui_begin();
@@ -317,6 +471,7 @@ static void show(void)
     case P_LAST2: show_last2(); break;
     case P_COMPASS: show_compass(); break;
     case P_LIGHT: show_light(); break;
+    case P_FIRE: show_fire(); break;
     default:
         break;
     }
@@ -334,6 +489,7 @@ static void show(void)
         ui_button(32, "Sun", "Sunrise, sunset", UI_HALF);
         ui_button(33, "Power saving", "Extreme, Last 2 %, time left", UI_HALF);
         ui_button(36, "Light and sound", "Bright screen, whistle", UI_HALF);
+        ui_button(37, "Fire starter", "Pulses for a pencil lead", UI_HALF);
         ui_button(34, "Survival guide", "First aid, water, shelter, signals", 0);
         ui_button(35, "Compass and level", "Heading, tilt, steps", 0);
         ui_textline("Calls and messages: emergency calls need the modem; nothing here calls or sends.", GREY);
@@ -384,6 +540,13 @@ void app_event(const struct sbos_event *ev)
         } else if (page == P_USB && ev->id == 14 && fire_ok) {
             if (setting_set(SET_SURV_FIRE, 1) == 0)
                 timer_set(1, 500, 1);       /* the readout and the keep-alive */
+        } else if (page == P_FIRE && ev->id == 54 && fs_armed) {
+            /* the finger is still down: the kernel fires only while it stays */
+            if (fs_wool)                    /* the preset: 3 s, single, 1.5 A, the chip's own retry, no override */
+                (void)setting_set(SET_SURV_FS, 3 | 3 << 8 | 1 << 12 | 1 << 13);
+            else
+                (void)setting_set(SET_SURV_FS, fs_pulse | (fs_rep ? 1 : 0) << 4 | (fs_lim + 1) << 8 | 1 << 12 |
+                                               fs_ov << 16 | (fs_ov == 2 ? fs_vb_code[fs_vb] : 0) << 20);
         } else if (page == P_LIGHT && ev->id == 12 && setting_set(SET_SURV_WHISTLE, 1) == 0) {
             whistle_k = 1;
             timer_set(3, 1000, 0);
@@ -401,6 +564,16 @@ void app_event(const struct sbos_event *ev)
                 ++whistle_k;
                 timer_set(3, 1000, 0);
             }
+            break;
+        }
+        if (ev->id == 4) {                  /* the fire starter: 5 redraws a second while its page is open */
+            if (page != P_FIRE) {
+                timer_cancel(4);
+                setting_set(SET_SURV_FS_KEYS, 0);
+                break;
+            }
+            setting_set(SET_SURV_FS_KEYS, 54);   /* Power: short = Select, held 1 s = fire (while held) */
+            show();
             break;
         }
         if (ev->id == 2) {                  /* the compass page: 5 redraws a second; a keep-alive each second */
@@ -436,11 +609,32 @@ void app_event(const struct sbos_event *ev)
             setting_set(SET_SURV_SAVER, (int)ev->value);
         else if (ev->id == 13)
             fire_ok = (int)ev->value;
+        else if (ev->id == 57)
+            fs_wool = (int)ev->value;
+        else if (ev->id == 53) {
+            fs_armed = (int)ev->value;
+            if (!fs_armed && setting_get(SET_SURV_FS) == 1)
+                setting_set(SET_SURV_FS, 0);
+        }
         show();
         break;
     }
     case EV_APP_LEVEL:
-        if (ev->id == 5) {
+        if (ev->id == 55 || ev->id == 56) {
+            int v = (int)ev->value;
+            if (ev->id == 55)
+                fs_ov = v < 0 ? 0 : v > 2 ? 2 : v;
+            else
+                fs_vb = v < 0 ? 0 : v > 3 ? 3 : v;
+        } else if (ev->id >= 50 && ev->id <= 52) {
+            int v = (int)ev->value;
+            if (ev->id == 50)
+                fs_pulse = v < 0 ? 0 : v > 4 ? 4 : v;
+            else if (ev->id == 51)
+                fs_rep = v != 0;
+            else
+                fs_lim = v < 0 ? 0 : v > 2 ? 2 : v;
+        } else if (ev->id == 5) {
             int o = setting_get(SET_SURV_SOS);
             setting_set(SET_SURV_SOS, (o & ~0x30) | (int)(ev->value & 3) << 4);
         }
@@ -453,6 +647,12 @@ void app_event(const struct sbos_event *ev)
             app_open("guide");              /* 1.2-alpha28 */
         else if (ev->id == 36)
             page = P_LIGHT;
+        else if (ev->id == 37) {
+            page = P_FIRE;
+            fs_armed = 0;
+            setting_set(SET_SURV_FS_KEYS, 54);
+            timer_set(4, 200, 1);
+        }
         else if (ev->id == 11 && page == P_LIGHT) {
             setting_set(SET_SURV_LIGHT, 1);
             ui_light(0xffffffffU);          /* any touch or key ends it: EV_APP_SHOW then */
@@ -466,6 +666,13 @@ void app_event(const struct sbos_event *ev)
             if (page == P_USB && setting_get(SET_SURV_USB) > 0)
                 timer_set(1, 500, 1);
         } else if (ev->id == 40) {          /* Back to Emergency */
+            if (page == P_FIRE) {
+                if (setting_get(SET_SURV_FS) == 1)
+                    setting_set(SET_SURV_FS, 0);
+                fs_armed = 0;
+                timer_cancel(4);
+                setting_set(SET_SURV_FS_KEYS, 0);
+            }
             if (page == P_COMPASS) {
                 timer_cancel(2);
                 setting_set(SET_SURV_SENSORS, 0);
@@ -498,11 +705,22 @@ void app_event(const struct sbos_event *ev)
     case EV_APP_POWER:                      /* 1.2-alpha29: the screen went off: fire mode ends with it */
         if (!ev->value && setting_get(SET_SURV_FIRE) == 1)
             setting_set(SET_SURV_FIRE, 0);
+        if (!ev->value && setting_get(SET_SURV_FS) == 1)
+            setting_set(SET_SURV_FS, 0);
+        if (!ev->value) {
+            fs_armed = 0;
+            setting_set(SET_SURV_FS_KEYS, 0);
+        }
         break;
     case EV_APP_BACK:                       /* the kernel closes the app: start at the main page next time */
         if (setting_get(SET_SURV_FIRE) == 1)
             setting_set(SET_SURV_FIRE, 0);
+        if (setting_get(SET_SURV_FS) == 1)
+            setting_set(SET_SURV_FS, 0);
         fire_ok = 0;
+        fs_armed = 0;
+        timer_cancel(4);
+        setting_set(SET_SURV_FS_KEYS, 0);
         if (page == P_COMPASS) {
             timer_cancel(2);
             setting_set(SET_SURV_SENSORS, 0);

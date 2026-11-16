@@ -9,6 +9,7 @@
 #include "kern.h"
 #include "kapp.h"
 #include "survival.h"
+#include "kinput.h"
 #include "gnssfix.h"
 
 struct kapp apps[APP_MAX];
@@ -673,6 +674,27 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
             return 0;
         }
         return surv_usb_fire_start() == 0 ? 0 : SBOS_EAGAIN;
+    case SET_SURV_FS: {                 /* 1.2-alpha30: the fire starter */
+        if (!arg[1]) {
+            surv_usb_stop("Stop on the screen");
+            return 0;
+        }
+        uint64_t v = arg[1];
+        unsigned pc = (unsigned)(v & 0xfU), lc = (unsigned)((v >> 8) & 0xfU);
+        if (!(v & 0x1000U) || pc > 4U || lc < 1U || lc > 3U)
+            return SBOS_EINVAL;
+        unsigned ov = (unsigned)((v >> 16) & 3U), vb = (unsigned)((v >> 20) & 0x7fU);
+        if (ov > 2U)
+            return SBOS_EINVAL;
+        static const uint32_t pms[5] = { 500U, 1000U, 2000U, 3000U, 5000U };
+        return surv_fs_start_x(pc <= 1U ? pms[pc] : ov ? SURV_FS_OV_MAX_MS : pms[pc],
+                               (int)((v >> 4) & 1U), lc == 1 ? 900 : lc == 2 ? 1200 : 1500, (int)ov,
+                               ov == 2U ? (int)vb : 0, (int)((v >> 13) & 1U)) == 0 ? 0 : SBOS_EAGAIN;
+    }
+    case SET_SURV_FS_KEYS:              /* 1.2-alpha30: the fire page's key mode, refreshed by its timer */
+        kin_fire_keys_id = arg[1] > 0 && arg[1] < 1000 ? (int)arg[1] : 0;
+        kin_fire_keys_t = kin_fire_keys_id ? sb_ms() : 0;
+        return 0;
     case SET_SURV_SAVER:                /* 1.2-alpha29 */
         return surv_saver_set(arg[1] != 0, "the switch in Emergency");
     case SET_SURV_LIGHT:
@@ -1133,6 +1155,47 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
             surv_usb_status(&u);
             return u.ilim_ma;
         }
+        case SET_SURV_FS: {
+            struct surv_usb u;
+            surv_usb_status(&u);
+            return u.fire == 2 ? (u.state == SURV_USB_OFF && u.refused ? -1 : u.state) : 0;
+        }
+        case SET_SURV_FS_INFO: {
+            struct surv_usb u;
+            surv_usb_status(&u);
+            uint64_t n = (uint64_t)(u.fs_n > 15 ? 15 : u.fs_n < 0 ? 0 : u.fs_n), mx = (uint64_t)(u.fs_max > 15 ? 15 : u.fs_max < 0 ? 0 : u.fs_max);
+            uint64_t why = (uint64_t)(u.fs_why < 0 ? 0 : u.fs_why > 31 ? 31 : u.fs_why);
+            uint64_t t = (uint64_t)(u.ms_left < 0 ? 0 : (u.ms_left + 99) / 100);
+            uint64_t c = u.bat_c10 <= -1000 || u.bat_c10 < 0 ? 1023U : (uint64_t)(u.bat_c10 > 1022 ? 1022 : u.bat_c10);
+            return (int64_t)(n | mx << 4 | (uint64_t)(u.fs_out ? 1 : 0) << 8 | why << 9 | (t > 255 ? 255 : t) << 14 | c << 22);
+        }
+        case SET_SURV_FS_LAST: {
+            struct surv_usb u;
+            surv_usb_status(&u);
+            uint64_t a = u.fs_avg_ma < 0 ? 0xfffU : (uint64_t)(u.fs_avg_ma > 4094 ? 4094 : u.fs_avg_ma);
+            uint64_t pk = u.fs_peak_ma < 0 ? 0xfffU : (uint64_t)(u.fs_peak_ma > 4094 ? 4094 : u.fs_peak_ma);
+            uint64_t vm = u.fs_vmin < 0 ? 0xfU : (uint64_t)(u.fs_vmin > 14 ? 14 : u.fs_vmin);
+            return (int64_t)(a | pk << 12 | vm << 24);
+        }
+        case SET_SURV_FS_KEYS: return kin_fire_keys_id;
+        case SET_SURV_FS_SPLIT: {
+            struct surv_usb u;
+            surv_usb_status(&u);
+            return (int64_t)((uint64_t)(u.fs_load_w10 < 0 ? 0 : u.fs_load_w10 > 0x7fff ? 0x7fff : u.fs_load_w10) |
+                             (uint64_t)(u.fs_chip_w10 < 0 ? 0 : u.fs_chip_w10 > 0x7fff ? 0x7fff : u.fs_chip_w10) << 16);
+        }
+        case SET_SURV_FS_VBYP: {
+            struct surv_usb u;
+            surv_usb_status(&u);
+            return (int64_t)((uint64_t)(u.fs_vbyp_mv < 0 ? 0 : u.fs_vbyp_mv > 0xffff ? 0xffff : u.fs_vbyp_mv) |
+                             (uint64_t)(u.fs_cellw10 < 0 ? 0 : u.fs_cellw10 > 0x7fff ? 0x7fff : u.fs_cellw10) << 16);
+        }
+        case SET_SURV_FS_W10: {
+            struct surv_usb u;
+            surv_usb_status(&u);
+            return (int64_t)((uint64_t)(u.fs_w10 < 0 ? 0 : u.fs_w10 > 255 ? 255 : u.fs_w10) |
+                             (uint64_t)(u.fs_sag_mv < 0 ? 0 : u.fs_sag_mv) << 8);
+        }
         case SET_SURV_FIRE_INFO: {
             struct surv_usb u;
             surv_usb_status(&u);
@@ -1185,7 +1248,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         int64_t r = setting_set_k(arg[0], arg[1]);
         if (r == 0 && arg[0] != SET_GPU_HEAT && arg[0] != SET_SURV_USB && arg[0] != SET_SURV_LAST2 &&
             arg[0] != SET_SURV_SENSORS && arg[0] != SET_SURV_LIGHT && arg[0] != SET_SURV_WHISTLE &&
-            arg[0] != SET_SURV_FIRE)
+            arg[0] != SET_SURV_FIRE && arg[0] != SET_SURV_FS && arg[0] != SET_SURV_FS_KEYS)
             settings_changed();             /* saved in 3 s where there is a state slot (the GPU never is) */
         return r;
     }

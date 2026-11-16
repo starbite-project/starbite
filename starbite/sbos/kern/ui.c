@@ -14,6 +14,7 @@
 #include "kern.h"
 #include "kinput.h"
 #include "catalog.h"
+#include "survival.h"
 #ifdef SB_HOST
 #include <stdio.h>
 #include <stdlib.h>
@@ -2688,9 +2689,26 @@ static void guest_kevent(const struct kin *ev)
     }
 }
 
+/* 1.2-alpha30: the finger on the screen, kept before any screen's own handling: the fire starter fires only while
+ * it stays down (and near where the hold was), and stops at the lift itself, not at a later redraw */
+static int finger_down, finger_x, finger_y;
+int kui_finger_down(void) { return finger_down || kin_fire_trigger(); }   /* or Power held on the fire page */
+
 void ui_kevent(const void *evp)
 {
     const struct kin *ev = evp;
+    if (ev->type == KIN_PRESS) {
+        finger_down = 1;
+        finger_x = ev->x;
+        finger_y = ev->y;
+    } else if (ev->type == KIN_RELEASE) {
+        finger_down = 0;
+        surv_fs_release();
+    } else if (ev->type == KIN_MOVE && finger_down &&
+               (ev->x - finger_x > 250 || finger_x - ev->x > 250 || ev->y - finger_y > 250 || finger_y - ev->y > 250)) {
+        finger_down = 0;                    /* slid well off the button: as a lift */
+        surv_fs_release();
+    }
     if (screen == SCR_OFF)
         return;
     if (screen == SCR_GUEST && guest_shown()) {
@@ -2827,6 +2845,10 @@ void ui_kevent(const void *evp)
     }
     case KIN_BACK:
         back();
+        break;
+    case KIN_FIRE:                          /* 1.2-alpha30: Power held on the fire starter's page = its hold */
+        if (screen == SCR_APP && app_front >= 0 && kin_fire_keys_id > 0)
+            app_event_send(app_front, EV_APP_HOLD, (uint32_t)kin_fire_keys_id, 0);
         break;
     default:
         break;
