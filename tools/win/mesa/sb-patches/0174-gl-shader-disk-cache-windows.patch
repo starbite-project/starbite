@@ -1,7 +1,7 @@
 From e7fcee5da6f0ec4cb31ef01969eedf3c678712d2 Mon Sep 17 00:00:00 2001
 From: Starbite build <build@starbite.invalid>
 Date: Mon, 16 Nov 2026 17:31:45 +0200
-Subject: [PATCH 1/2] 0171: the on-disk shader cache on Windows (GL kit):
+Subject: [PATCH 1/3] 0171: the on-disk shader cache on Windows (GL kit):
  -Dshader-cache=enabled builds there
 
 Mesa refuses the shader cache on Windows (meson) and has no file code for it
@@ -2827,6 +2827,1441 @@ index 7bfa08f..6173453 100644
 +         EXPECT_EQ(id, first) << file << " is the same build, another identity";
 +      }
 +   }
++}
+-- 
+2.43.0
+
+From 8909baf50e98cc39e161e50053609fb6baba57fc Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 17:31:45 +0200
+Subject: [PATCH 2/3] 0172: st/mesa: pipe_context::link_shader also for a
+ program from the shader cache
+
+st_link_glsl_to_nir returned early for a cached program and never told the
+driver which shaders belong together. Panfrost then compiles the fragment
+shader without the varying layout of the vertex shader: the general form,
+under another cache key than at the first start. Measured on the host
+(48 programs): second start 96 hits / 48 misses and every fragment shader
+compiled again; with this 144 hits / 0 misses, and the same fragment shader
+code as without a cache.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/mesa/state_tracker/st_glsl_to_nir.cpp | 55 +++++++++++++++--------
+ 1 file changed, 37 insertions(+), 18 deletions(-)
+
+diff --git a/src/mesa/state_tracker/st_glsl_to_nir.cpp b/src/mesa/state_tracker/st_glsl_to_nir.cpp
+index 07f1344..e69a7c7 100644
+--- a/src/mesa/state_tracker/st_glsl_to_nir.cpp
++++ b/src/mesa/state_tracker/st_glsl_to_nir.cpp
+@@ -434,6 +434,41 @@ st_nir_lower_wpos_ytransform(struct nir_shader *nir,
+    return progress;
+ }
+ 
++/* Tell the driver which of its shaders make up the linked program
++ * (pipe_context::link_shader).
++ *
++ * sb-patches/0172: its own function, because a program that comes from the
++ * on-disk cache needs this as much as one that was just linked.  Without it
++ * Panfrost never learns the varying layout of the vertex shader for a cached
++ * program: its fragment shader is then compiled in the general form and under
++ * another key than at the first start, so the second start of an application
++ * compiled every fragment shader once more (and ran other fragment shader
++ * code than a start without the cache).
++ */
++static void
++st_link_driver_shaders(struct gl_context *ctx,
++                       struct gl_shader_program *shader_program)
++{
++   struct pipe_context *pctx = st_context(ctx)->pipe;
++   if (pctx->link_shader) {
++      void *driver_handles[MESA_SHADER_MESH_STAGES];
++      memset(driver_handles, 0, sizeof(driver_handles));
++
++      for (uint32_t i = 0; i < MESA_SHADER_MESH_STAGES; ++i) {
++         struct gl_linked_shader *shader = shader_program->_LinkedShaders[i];
++         if (shader) {
++            struct gl_program *p = shader->Program;
++            if (p && p->variants) {
++               mesa_shader_stage type = shader->Stage;
++               driver_handles[type] = p->variants->driver_shader;
++            }
++         }
++      }
++
++      pctx->link_shader(pctx, driver_handles);
++   }
++}
++
+ static bool
+ st_link_glsl_to_nir(struct gl_context *ctx,
+                     struct gl_shader_program *shader_program)
+@@ -444,6 +479,7 @@ st_link_glsl_to_nir(struct gl_context *ctx,
+ 
+    /* Return early if we are loading the shader from on-disk cache */
+    if (st_load_nir_from_disk_cache(ctx, shader_program)) {
++      st_link_driver_shaders(ctx, shader_program); /* sb-patches/0172 */
+       return GL_TRUE;
+    }
+ 
+@@ -652,24 +688,7 @@ st_link_glsl_to_nir(struct gl_context *ctx,
+       }
+    }
+ 
+-   struct pipe_context *pctx = st_context(ctx)->pipe;
+-   if (pctx->link_shader) {
+-      void *driver_handles[MESA_SHADER_MESH_STAGES];
+-      memset(driver_handles, 0, sizeof(driver_handles));
+-
+-      for (uint32_t i = 0; i < MESA_SHADER_MESH_STAGES; ++i) {
+-         struct gl_linked_shader *shader = shader_program->_LinkedShaders[i];
+-         if (shader) {
+-            struct gl_program *p = shader->Program;
+-            if (p && p->variants) {
+-               mesa_shader_stage type = shader->Stage;
+-               driver_handles[type] = p->variants->driver_shader;
+-            }
+-         }
+-      }
+-
+-      pctx->link_shader(pctx, driver_handles);
+-   }
++   st_link_driver_shaders(ctx, shader_program);
+ 
+    return true;
+ }
+-- 
+2.43.0
+
+From f2e5052c2c147d72f1301568a94bca33dde2c34e Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 20:33:23 +0200
+Subject: [PATCH 3/3] 0173: shader cache after T89: a launcher cannot switch it
+ off by cache type, every failure says why, directory stand-ins
+
+T89 (Geometry Dash started by Steam): the cache was off and the log had only
+"Mesa single file cache selected but Mesa wasn't built with single cache file
+support". The game's environment asked for MESA_DISK_CACHE_SINGLE_FILE, a type
+that is a failing stub on Windows; nothing said that this was why.
+
+- util: where the multi-file cache is the only one (Windows), disk_cache_create
+  takes it whatever type the environment asks for (and notes what it ignored);
+  MESA_DISK_CACHE_MULTI_FILE=false still means no cache.
+- util: disk_cache_os_note: every step that can leave a process without a
+  cache writes down which step, which path and the system error (the switches,
+  each directory tried, the index file: open, size, map; the thread).
+- util: the default directory has stand-ins, taken in order when a file can be
+  created there: %LOCALAPPDATA%, %USERPROFILE%\AppData\Local,
+  C:\ProgramData\Starbite\shader-cache-<user>. A directory given by
+  MESA_SHADER_CACHE_DIR has none.
+- panfrost: one decision line per process, always: "<name>: on, dir ... (from
+  ...), limit, driver id ..." or "<name>: OFF: <reason>"; places passed over
+  and what the target wants said are in it.
+- wgl: the name is "gl shader cache"; the Mesa cache variables found in the
+  environment are reported, and the directory and size ones are removed (ours
+  come from SB_GL_SHADER_CACHE_DIR / SB_GL_SHADER_CACHE_MAX for tests); the
+  flag file is a reason handed to the driver, no longer an environment switch.
+- tests: SbLauncherEnvironmentDoesNotSwitchOff, SbOffSaysWhy,
+  SbDirectoryStandIns.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/gallium/drivers/panfrost/pan_disk_cache.c |  91 ++++-
+ src/gallium/targets/wgl/wgl.c                 |  59 ++-
+ src/util/disk_cache.c                         |  41 +-
+ src/util/disk_cache_os.c                      |  70 +++-
+ src/util/disk_cache_os.h                      |  32 ++
+ src/util/disk_cache_os_portable.c             | 364 +++++++++++++++---
+ src/util/tests/cache_test.cpp                 | 278 +++++++++++++
+ 7 files changed, 849 insertions(+), 86 deletions(-)
+
+diff --git a/src/gallium/drivers/panfrost/pan_disk_cache.c b/src/gallium/drivers/panfrost/pan_disk_cache.c
+index bdb159d..8f18572 100644
+--- a/src/gallium/drivers/panfrost/pan_disk_cache.c
++++ b/src/gallium/drivers/panfrost/pan_disk_cache.c
+@@ -30,15 +30,38 @@ static bool debug = false;
+  *  - one line with the counters at every 32nd compiled-shader lookup, at the first frame, and when the process ends
+  *    (with the cache off: the first-frame line alone, so that an on/off comparison has the same time in both logs).
+  *
++ * sb-patches/0173 (T89: the cache stayed off on the phone and the log did not say why): the first of those lines is
++ * the decision, printed exactly once per process, and it always carries the reason:
++ *
++ *    sbumd: gl shader cache: on, dir <dir> (from <which place>), limit 64 MiB, driver id <id> (...), flags ...
++ *    sbumd: gl shader cache: OFF: <the step that gave up, its path, the Win32 error>
++ *
++ * The reason comes from the target (a flag file), from this file (no build identity) or from the notes that
++ * util/disk_cache*.c writes at every step that can fail (disk_cache_os_note). Places that were tried for the
++ * directory and passed over are named in the "on" line too. The target sets the three variables below before it
++ * makes the screen: the name the lines carry ("gl shader cache"), a reason when it switched the cache off, and
++ * anything it wants said in the decision line.
++ *
+  * "lookups" counts every disk_cache_get of the process: the linked GLSL programs of the GL state tracker and the
+  * compiled shaders of this file. "compiled shaders" are the lookups of this file alone, with the time the hits took
+  * to read and the time the misses took to compile (the Bifrost compiler: the work a hit saves).
+  */
++#include <stdarg.h>
+ #include <stdlib.h>
+ #include <windows.h>
+ 
+ #include "util/u_atomic.h"
+ 
++const char *panfrost_sb_shader_cache_name; /* NULL: "shader cache" */
++const char *panfrost_sb_shader_cache_off;  /* not NULL: no cache, and this is why */
++const char *panfrost_sb_shader_cache_note; /* not NULL: goes into the decision line */
++
++static const char *
++sb_cache_name(void)
++{
++   return panfrost_sb_shader_cache_name ? panfrost_sb_shader_cache_name : "shader cache";
++}
++
+ static double
+ sb_cache_process_seconds(void)
+ {
+@@ -51,6 +74,29 @@ sb_cache_process_seconds(void)
+    return b > a ? (double)(b - a) / 1e7 : 0.0;
+ }
+ 
++/* the decision line: once per process, whatever is decided and wherever */
++static void sb_cache_decision(const char *fmt, ...) PRINTFLIKE(1, 2);
++
++static void
++sb_cache_decision(const char *fmt, ...)
++{
++   static int decided;
++   char text[2560];
++   va_list ap;
++
++   if (p_atomic_xchg(&decided, 1))
++      return;
++
++   va_start(ap, fmt);
++   vsnprintf(text, sizeof(text), fmt, ap);
++   va_end(ap);
++
++   fprintf(stderr, "sbumd: %s: %s%s%s; %.1f s after process start\n", sb_cache_name(), text,
++           panfrost_sb_shader_cache_note ? "; " : "",
++           panfrost_sb_shader_cache_note ? panfrost_sb_shader_cache_note : "", sb_cache_process_seconds());
++   fflush(stderr);
++}
++
+ #if defined(ENABLE_SHADER_CACHE)
+ #include "util/disk_cache_os.h" /* struct disk_cache: the path, the limit and the counters */
+ #include "util/os_time.h"
+@@ -70,9 +116,10 @@ static void
+ sb_cache_log(const char *when)
+ {
+    fprintf(stderr,
+-           "sbumd: shader cache: %s, %.1f s after process start: %u lookups, %u hits, %u misses; compiled shaders: "
++           "sbumd: %s: %s, %.1f s after process start: %u lookups, %u hits, %u misses; compiled shaders: "
+            "%u hits (%.0f ms reading), %u misses (%.0f ms compiling); %u entries written\n",
+-           when, sb_cache_process_seconds(), sb_cache.all_hits + sb_cache.all_misses, sb_cache.all_hits,
++           sb_cache_name(), when, sb_cache_process_seconds(), sb_cache.all_hits + sb_cache.all_misses,
++           sb_cache.all_hits,
+            sb_cache.all_misses, sb_cache.hits, (double)p_atomic_read(&sb_cache.read_ns) / 1e6, sb_cache.misses,
+            (double)p_atomic_read(&sb_cache.compile_ns) / 1e6, sb_cache.puts);
+    fflush(stderr);
+@@ -112,7 +159,7 @@ panfrost_disk_cache_first_frame(struct panfrost_screen *screen)
+       return;
+    }
+ #endif
+-   fprintf(stderr, "sbumd: shader cache: off; first frame, %.1f s after process start\n",
++   fprintf(stderr, "sbumd: %s: off; first frame, %.1f s after process start\n", sb_cache_name(),
+            sb_cache_process_seconds());
+    fflush(stderr);
+ }
+@@ -280,6 +327,13 @@ panfrost_disk_cache_init(struct panfrost_screen *screen)
+    char timestamp[BLAKE3_HEX_LEN];
+ 
+ #ifdef _WIN32
++   /* sb-patches/0173: the target switched the cache off (GL: the flag file glnocache). Nothing is made: with no
++    * cache at all the state tracker takes exactly the path of the builds without -Dshader-cache. */
++   if (panfrost_sb_shader_cache_off) {
++      sb_cache_decision("OFF: %s", panfrost_sb_shader_cache_off);
++      return;
++   }
++
+    /* sb-patches/0171: a PE image has no build-id note. What names this build of the driver: the identity of the
+     * module this function is in (its link time stamp and section layout, util/disk_cache_os.c) and the Mesa version
+     * with the git commit. Every cache key starts from this, so shaders compiled by another build are never found.
+@@ -291,8 +345,10 @@ panfrost_disk_cache_init(struct panfrost_screen *screen)
+       blake3_hash id;
+ 
+       _mesa_blake3_init(&hasher);
++      SetLastError(0);
+       if (!disk_cache_get_module_identifier(panfrost_disk_cache_init, &hasher, &sb_link_stamp)) {
+-         fprintf(stderr, "sbumd: shader cache: off (no build identity for this module)\n");
++         sb_cache_decision("OFF: no build identity for this module (its PE headers cannot be read, error %lu)",
++                           GetLastError());
+          return;
+       }
+       _mesa_blake3_update(&hasher, version, sizeof(version));
+@@ -321,28 +377,33 @@ panfrost_disk_cache_init(struct panfrost_screen *screen)
+    screen->disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
+ 
+ #ifdef _WIN32
+-   {  /* sb-patches/0171: a cache that is switched off (MESA_SHADER_CACHE_DISABLE, which the GL target sets for the
+-       * flag file glnocache) or has no usable directory comes back as an object that stores nothing. Drop it: with
+-       * no cache at all the state tracker takes exactly the path of the builds without -Dshader-cache. */
++   {  /* sb-patches/0171: a cache that is switched off (MESA_SHADER_CACHE_DISABLE) or has no usable directory
++       * comes back as an object that stores nothing. Drop it: with no cache at all the state tracker takes exactly
++       * the path of the builds without -Dshader-cache.
++       * sb-patches/0173: the decision line, with the reason util noted for whichever step gave up. */
+       struct disk_cache *cache = screen->disk_cache;
++      const char *notes = disk_cache_os_notes();
++      const bool made = cache != NULL;
++
+       if (cache && cache->path_init_failed) {
+          disk_cache_destroy(cache);
+          screen->disk_cache = cache = NULL;
+       }
+       if (cache) {
+          cache->stats.enabled = true;
+-         fprintf(stderr,
+-                 "sbumd: shader cache: on, %s, limit %llu MiB, driver id %s (link stamp 0x%08x, Mesa "
+-                 PACKAGE_VERSION MESA_GIT_SHA1 "), flags 0x%llx; %.1f s after process start\n",
+-                 cache->path, (unsigned long long)(cache->max_size >> 20), timestamp, (unsigned)sb_link_stamp,
+-                 (unsigned long long)driver_flags, sb_cache_process_seconds());
++         sb_cache_decision("on, dir %s (from %s), limit %llu MiB, driver id %s (link stamp 0x%08x, Mesa "
++                           PACKAGE_VERSION MESA_GIT_SHA1 "), flags 0x%llx%s%s",
++                           cache->path, disk_cache_os_dir_source(), (unsigned long long)(cache->max_size >> 20),
++                           timestamp, (unsigned)sb_link_stamp, (unsigned long long)driver_flags,
++                           notes[0] ? "; passed over: " : "", notes);
+          if (!p_atomic_xchg(&sb_cache.on, 1))
+             atexit(sb_cache_at_exit);
++      } else if (notes[0]) {
++         sb_cache_decision("OFF: %s", notes);
+       } else {
+-         fprintf(stderr, "sbumd: shader cache: off (switched off, or its directory cannot be used); %.1f s after "
+-                         "process start\n", sb_cache_process_seconds());
++         sb_cache_decision("OFF: %s", made ? "the cache came back unusable and no step said why"
++                                           : "disk_cache_create gave nothing and no step said why (out of memory?)");
+       }
+-      fflush(stderr);
+    }
+ #endif
+ #endif
+diff --git a/src/gallium/targets/wgl/wgl.c b/src/gallium/targets/wgl/wgl.c
+index fa856eb..61bbca6 100644
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -112,16 +112,59 @@ wgl_panfrost_create(void)
+               e ? "SB_GL_CACHED" : "C:\\ProgramData\\Starbite\\glcached");
+    }
+    /* sb-patches/0171: the on-disk shader cache (%LOCALAPPDATA%\Starbite\shader-cache, util/disk_cache_os_portable.c)
+-    * is on unless C:\ProgramData\Starbite\glnocache exists or SB_GL_SHADER_CACHE=0. Off is Mesa's own switch,
+-    * read when the screen makes its cache (pan_disk_cache.c says in the log what came of it). */
++    * is on unless C:\ProgramData\Starbite\glnocache exists or SB_GL_SHADER_CACHE=0.
++    *
++    * sb-patches/0173 (T89): Steam starts its games with Mesa's cache variables in the environment (on the phone
++    * MESA_DISK_CACHE_SINGLE_FILE=1 picked a cache type that does not exist on Windows, and the cache was off without
++    * a word). What a launcher put there must not decide where our cache lives, how large it may get or of which type
++    * it is: the directory and the size variables are taken out of this process's environment (the type is settled in
++    * util/disk_cache.c), and what was found is said in the decision line. For a test, SB_GL_SHADER_CACHE_DIR and
++    * SB_GL_SHADER_CACHE_MAX set the directory and the limit. MESA_SHADER_CACHE_DISABLE is left alone: "off" is
++    * honoured whoever says it. The decision line itself comes from pan_disk_cache.c, once. */
+    {
++      extern const char *panfrost_sb_shader_cache_name, *panfrost_sb_shader_cache_off,
++         *panfrost_sb_shader_cache_note;
++      static const char *const from_launcher[] = {
++         "MESA_DISK_CACHE_SINGLE_FILE", "MESA_DISK_CACHE_DATABASE", "MESA_DISK_CACHE_MULTI_FILE",
++         "MESA_DISK_CACHE_COMBINE_RW_WITH_RO_FOZ", "MESA_DISK_CACHE_READ_ONLY_FOZ_DBS",
++         "MESA_DISK_CACHE_READ_ONLY_FOZ_DBS_DYNAMIC_LIST", "MESA_SHADER_CACHE_DIR", "MESA_GLSL_CACHE_DIR",
++         "MESA_SHADER_CACHE_MAX_SIZE", "MESA_GLSL_CACHE_MAX_SIZE", "MESA_SHADER_CACHE_DISABLE",
++         "MESA_GLSL_CACHE_DISABLE",
++      };
++      static char note[1024], off[128];
+       const char *e = getenv("SB_GL_SHADER_CACHE");
+-      int on = e ? e[0] != '0'
+-                 : GetFileAttributesA("C:\\ProgramData\\Starbite\\glnocache") == INVALID_FILE_ATTRIBUTES;
+-      if (!on) {
+-         os_set_option("MESA_SHADER_CACHE_DISABLE", "true", true);
+-         fprintf(stderr, "sbumd: gl shader cache: off (%s)\n",
+-                 e ? "SB_GL_SHADER_CACHE" : "C:\\ProgramData\\Starbite\\glnocache");
++      const char *v;
++      size_t used = 0;
++
++      panfrost_sb_shader_cache_name = "gl shader cache";
++
++      note[0] = '\0';
++      for (unsigned i = 0; i < ARRAY_SIZE(from_launcher) && used < sizeof(note) - 1; i++) {
++         if ((v = os_get_option(from_launcher[i])) != NULL) {
++            int n = snprintf(note + used, sizeof(note) - used, "%s%s=%.100s",
++                             used ? " " : "environment at start: ", from_launcher[i], v);
++            used = n < 0 ? used : MIN2(used + (size_t)n, sizeof(note) - 1);
++         }
++      }
++      if (used && used < sizeof(note) - 64)
++         snprintf(note + used, sizeof(note) - used, " (type, directory and size from it are not used)");
++      panfrost_sb_shader_cache_note = used ? note : NULL;
++
++      os_unset_option("MESA_SHADER_CACHE_DIR");
++      os_unset_option("MESA_GLSL_CACHE_DIR");
++      os_unset_option("MESA_SHADER_CACHE_MAX_SIZE");
++      os_unset_option("MESA_GLSL_CACHE_MAX_SIZE");
++      if ((v = getenv("SB_GL_SHADER_CACHE_DIR")) != NULL && v[0])
++         os_set_option("MESA_SHADER_CACHE_DIR", v, true);
++      if ((v = getenv("SB_GL_SHADER_CACHE_MAX")) != NULL && v[0])
++         os_set_option("MESA_SHADER_CACHE_MAX_SIZE", v, true);
++
++      panfrost_sb_shader_cache_off = NULL;
++      if (e ? e[0] == '0'
++            : GetFileAttributesA("C:\\ProgramData\\Starbite\\glnocache") != INVALID_FILE_ATTRIBUTES) {
++         snprintf(off, sizeof(off), "switched off by %s",
++                  e ? "SB_GL_SHADER_CACHE=0" : "C:\\ProgramData\\Starbite\\glnocache");
++         panfrost_sb_shader_cache_off = off;
+       }
+    }
+    struct pipe_screen *screen = panfrost_drm_screen_create(fd, &config);
+diff --git a/src/util/disk_cache.c b/src/util/disk_cache.c
+index 73ea830..f86ee41 100644
+--- a/src/util/disk_cache.c
++++ b/src/util/disk_cache.c
+@@ -161,11 +161,15 @@ disk_cache_type_create(const char *gpu_name,
+ #endif
+ 
+    if (cache_type == DISK_CACHE_SINGLE_FILE) {
+-      if (!disk_cache_load_cache_index_foz(local, cache))
++      if (!disk_cache_load_cache_index_foz(local, cache)) {
++         disk_cache_os_note("the single-file cache cannot be opened in %s", path);
+          goto path_fail;
++      }
+    } else if (cache_type == DISK_CACHE_DATABASE) {
+-      if (!disk_cache_db_load_cache_index(local, cache))
++      if (!disk_cache_db_load_cache_index(local, cache)) {
++         disk_cache_os_note("the database cache cannot be opened in %s", path);
+          goto path_fail;
++      }
+    }
+ 
+    if (!os_get_option("MESA_SHADER_CACHE_DIR") && !os_get_option("MESA_GLSL_CACHE_DIR"))
+@@ -186,8 +190,10 @@ disk_cache_type_create(const char *gpu_name,
+    else if (cache->type == DISK_CACHE_MULTI_FILE && !disk_cache_size_is_valid(cache))
+       disk_cache_recompute_size(cache);
+ 
+-   if (!disk_cache_init_queue(cache))
++   if (!disk_cache_init_queue(cache)) {
++      disk_cache_os_note("the thread that writes the cache cannot be started");
+       goto fail;
++   }
+ 
+ #if DISK_CACHE_OS_PORTABLE
+    /* sb-patches/0171: see disk_cache_os_portable.c */
+@@ -251,8 +257,33 @@ disk_cache_create(const char *gpu_name, const char *driver_id,
+    struct disk_cache *cache;
+    uint64_t max_size = 0;
+    const char *max_size_str;
++   bool only_multi_file = false;
+ 
+-   if (debug_get_bool_option("MESA_DISK_CACHE_SINGLE_FILE", false)) {
++   disk_cache_os_notes_clear(); /* sb-patches/0173 */
++
++#if DISK_CACHE_OS_PORTABLE
++   /* sb-patches/0173: the single-file and the database cache are stubs that
++    * fail on Windows.  Asking for one there used to be a way to get no cache
++    * at all, and Steam does ask: its games start with
++    * MESA_DISK_CACHE_SINGLE_FILE=1 in the environment (T89: "Mesa single file
++    * cache selected but Mesa wasn't built with single cache file support").
++    * The multi-file cache is the only one, so it is the one.  Saying "no
++    * multi-file cache" still means no cache. */
++   only_multi_file = disk_cache_os_only_multi_file();
++#endif
++
++   if (only_multi_file) {
++      if (!debug_get_bool_option("MESA_DISK_CACHE_MULTI_FILE", true)) {
++         disk_cache_os_note("switched off by MESA_DISK_CACHE_MULTI_FILE in the environment "
++                            "(the multi-file cache is the only one here)");
++         return NULL;
++      }
++      if (debug_get_bool_option("MESA_DISK_CACHE_SINGLE_FILE", false))
++         disk_cache_os_note("MESA_DISK_CACHE_SINGLE_FILE in the environment ignored");
++      if (debug_get_bool_option("MESA_DISK_CACHE_DATABASE", false))
++         disk_cache_os_note("MESA_DISK_CACHE_DATABASE in the environment ignored");
++      cache_type = DISK_CACHE_MULTI_FILE;
++   } else if (debug_get_bool_option("MESA_DISK_CACHE_SINGLE_FILE", false)) {
+       cache_type = DISK_CACHE_SINGLE_FILE;
+    } else if (debug_get_bool_option("MESA_DISK_CACHE_DATABASE", false)) {
+       cache_type = DISK_CACHE_DATABASE;
+@@ -265,6 +296,7 @@ disk_cache_create(const char *gpu_name, const char *driver_id,
+    } else if (debug_get_bool_option("MESA_DISK_CACHE_MULTI_FILE", true)) {
+       cache_type = DISK_CACHE_MULTI_FILE;
+    } else {
++      disk_cache_os_note("no cache type is switched on in the environment");
+       return NULL;
+    }
+ 
+@@ -326,6 +358,7 @@ disk_cache_create(const char *gpu_name, const char *driver_id,
+     * if entry isn't found there, then we'll fall back to the RW cache.
+     */
+    if (cache_type != DISK_CACHE_SINGLE_FILE && !cache->path_init_failed &&
++       !only_multi_file && /* sb-patches/0173 */
+        debug_get_bool_option("MESA_DISK_CACHE_COMBINE_RW_WITH_RO_FOZ", false)) {
+ 
+       /* Create read-only cache used for sharing prebuilt shaders.
+diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
+index acfc74f..9b33fb4 100644
+--- a/src/util/disk_cache_os.c
++++ b/src/util/disk_cache_os.c
+@@ -191,11 +191,59 @@ disk_cache_get_module_identifier(void *ptr, blake3_hasher *ctx,
+ 
+ #ifdef ENABLE_SHADER_CACHE
+ 
++#include <stdarg.h>
+ #include <stdio.h>
+ 
+ #include "util/blob.h"
+ #include "util/ralloc.h"
+ 
++/* sb-patches/0173: see disk_cache_os.h */
++static char disk_cache_notes[1536];
++static char disk_cache_dir_source[96];
++
++void
++disk_cache_os_note(const char *fmt, ...)
++{
++   size_t used = strlen(disk_cache_notes);
++   if (used + 4 >= sizeof(disk_cache_notes))
++      return;
++
++   if (used) {
++      memcpy(disk_cache_notes + used, "; ", 3);
++      used += 2;
++   }
++
++   va_list ap;
++   va_start(ap, fmt);
++   vsnprintf(disk_cache_notes + used, sizeof(disk_cache_notes) - used, fmt, ap);
++   va_end(ap);
++}
++
++const char *
++disk_cache_os_notes(void)
++{
++   return disk_cache_notes;
++}
++
++void
++disk_cache_os_notes_clear(void)
++{
++   disk_cache_notes[0] = '\0';
++   disk_cache_dir_source[0] = '\0';
++}
++
++void
++disk_cache_os_set_dir_source(const char *what)
++{
++   snprintf(disk_cache_dir_source, sizeof(disk_cache_dir_source), "%s", what);
++}
++
++const char *
++disk_cache_os_dir_source(void)
++{
++   return disk_cache_dir_source;
++}
++
+ /* sb-patches/0171: the blocks marked !DISK_CACHE_OS_PORTABLE are the POSIX
+  * file handling; disk_cache_os_portable.c has the same functions for Windows.
+  * What is outside those blocks (the bytes of an entry, the switches, the
+@@ -1219,8 +1267,10 @@ bool
+ disk_cache_enabled()
+ {
+    /* If running as a users other than the real user disable cache */
+-   if (!__normal_user())
++   if (!__normal_user()) {
++      disk_cache_os_note("not for a process that runs as another user than its real one");
+       return false;
++   }
+ 
+    /* At user request, disable shader cache entirely.
+     * Disk cache is not enabled by default for android, for most
+@@ -1246,11 +1296,21 @@ disk_cache_enabled()
+    }
+ #endif
+ 
+-   if (debug_get_bool_option(envvar_name, disable_by_default) ||
+-       /* MESA_GLSL_DISABLE_IO_OPT must disable the cache to get expected
+-        * results because it only takes effect on a cache miss. */
+-       debug_get_bool_option("MESA_GLSL_DISABLE_IO_OPT", false))
++   /* sb-patches/0173: the same two tests as before, each with its note */
++   if (debug_get_bool_option(envvar_name, disable_by_default)) {
++      if (os_get_option(envvar_name))
++         disk_cache_os_note("switched off by %s in the environment", envvar_name);
++      else
++         disk_cache_os_note("off by default in this build (-Dshader-cache-default=false)");
++      return false;
++   }
++
++   /* MESA_GLSL_DISABLE_IO_OPT must disable the cache to get expected
++    * results because it only takes effect on a cache miss. */
++   if (debug_get_bool_option("MESA_GLSL_DISABLE_IO_OPT", false)) {
++      disk_cache_os_note("switched off by MESA_GLSL_DISABLE_IO_OPT in the environment");
+       return false;
++   }
+ 
+    return true;
+ }
+diff --git a/src/util/disk_cache_os.h b/src/util/disk_cache_os.h
+index 281445a..0b6145c 100644
+--- a/src/util/disk_cache_os.h
++++ b/src/util/disk_cache_os.h
+@@ -40,6 +40,7 @@
+ #endif
+ 
+ #include "util/blob.h"
++#include "util/macros.h"
+ #include "util/fossilize_db.h"
+ #include "util/mesa_cache_db.h"
+ #include "util/mesa_cache_db_multipart.h"
+@@ -213,8 +214,39 @@ disk_cache_create_item_blob(struct disk_cache_put_job *dc_job,
+ #if DISK_CACHE_OS_PORTABLE
+ void
+ disk_cache_recompute_size_async(struct disk_cache *cache);
++
++/* sb-patches/0173: true where the single-file and the database cache do not
++ * exist (Windows): disk_cache_create then takes the multi-file cache whatever
++ * the environment asks for. */
++bool
++disk_cache_os_only_multi_file(void);
+ #endif
+ 
++/* sb-patches/0173: why a process has no cache.  Every step of
++ * disk_cache_create that gives up writes one note (which step, which path,
++ * the system's error code); so does a directory that was tried and not taken
++ * when a later one worked.  disk_cache_create empties the notes when it
++ * starts; the driver prints them (pan_disk_cache.c).  Not locked: caches are
++ * made one at a time, when a screen is made.
++ */
++void
++disk_cache_os_note(const char *fmt, ...) PRINTFLIKE(1, 2);
++
++/* "" when nothing was noted */
++const char *
++disk_cache_os_notes(void);
++
++void
++disk_cache_os_notes_clear(void);
++
++/* which of the possible places the cache directory was made in
++ * ("%LOCALAPPDATA%", "MESA_SHADER_CACHE_DIR", ...); "" when unknown */
++void
++disk_cache_os_set_dir_source(const char *what);
++
++const char *
++disk_cache_os_dir_source(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/util/disk_cache_os_portable.c b/src/util/disk_cache_os_portable.c
+index 8a2441b..84119c6 100644
+--- a/src/util/disk_cache_os_portable.c
++++ b/src/util/disk_cache_os_portable.c
+@@ -30,6 +30,19 @@
+  *  - the time of last use is written by us (at most once a day per entry):
+  *    Windows may not keep last-access times;
+  *  - a file counts with its size rounded up to 4 KiB (there is no st_blocks).
++ *
++ * sb-patches/0173 (the first run on a phone, T89, ended with the cache off and
++ * no word about why):
++ *
++ *  - every step that can leave the process without a cache writes down why,
++ *    with the Win32 error (disk_cache_os_note); the driver prints that;
++ *  - the directory has stand-ins: %LOCALAPPDATA%, then
++ *    %USERPROFILE%\AppData\Local, then
++ *    C:\ProgramData\Starbite\shader-cache-<user>; one is taken only when a
++ *    file can be created in it;
++ *  - disk_cache_os_only_multi_file: the other cache types do not exist on
++ *    Windows, so asking for one (Steam gives its games
++ *    MESA_DISK_CACHE_SINGLE_FILE=1) must not be a way to end up with none.
+  */
+ 
+ #include "util/disk_cache_os.h"
+@@ -76,6 +89,9 @@
+  * %LOCALAPPDATA%\<this>\mesa_shader_cache */
+ #define DC_WIN_DEFAULT_SUBDIR "Starbite\\shader-cache"
+ 
++/* ... and when no profile directory can be used: <this>-<user name> */
++#define DC_WIN_SHARED_ROOT "C:\\ProgramData\\Starbite\\shader-cache"
++
+ struct dc_dirent {
+    const char *name;   /* UTF-8, without the directory */
+    bool is_dir;
+@@ -123,6 +139,11 @@ dc_cost(uint64_t file_size)
+    return align64(MAX2(file_size, 1), DC_CLUSTER);
+ }
+ 
++/* The system's error code of the dc_mkdir / dc_can_write_in / dc_env_utf8
++ * that failed last (GetLastError on Windows, errno elsewhere), for the note
++ * that says why a directory was not taken. */
++static unsigned long dc_err;
++
+ /* ------------------------------------------------------------------------
+  * The file primitives
+  * ------------------------------------------------------------------------ */
+@@ -136,8 +157,10 @@ static WCHAR *
+ dc_wide(const char *path)
+ {
+    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+-   if (n <= 0)
++   if (n <= 0) {
++      dc_err = GetLastError();
+       return NULL;
++   }
+ 
+    WCHAR *w = malloc((size_t)n * sizeof(WCHAR));
+    if (w && MultiByteToWideChar(CP_UTF8, 0, path, -1, w, n) != n) {
+@@ -184,8 +207,37 @@ dc_mkdir(const char *path)
+ 
+    bool ok = CreateDirectoryW(w, NULL) ||
+              GetLastError() == ERROR_ALREADY_EXISTS;
++   if (!ok)
++      dc_err = GetLastError();
++   free(w);
++
++   if (ok && !dc_is_dir(path)) {
++      dc_err = ERROR_DIRECTORY; /* the name is taken by a file */
++      ok = false;
++   }
++   return ok;
++}
++
++/* True when a file can be created (or opened for writing) in `dir`.  The
++ * file is the index, which the cache makes there next anyway. */
++static bool
++dc_can_write_in(const char *dir)
++{
++   char *path = dc_asprintf("%s/index", dir);
++   WCHAR *w = path ? dc_wide(path) : NULL;
++   free(path);
++   if (!w)
++      return false;
++
++   HANDLE f = CreateFileW(w, GENERIC_READ | GENERIC_WRITE,
++                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
++                          NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
++   if (f == INVALID_HANDLE_VALUE)
++      dc_err = GetLastError();
++   else
++      CloseHandle(f);
+    free(w);
+-   return ok && dc_is_dir(path);
++   return f != INVALID_HANDLE_VALUE;
+ }
+ 
+ /* True (and *size) when `path` is a file. */
+@@ -393,27 +445,46 @@ dc_map_shared(const char *path, size_t size)
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(w);
+-   if (f == INVALID_HANDLE_VALUE)
++   if (f == INVALID_HANDLE_VALUE) {
++      disk_cache_os_note("cannot open %s (CreateFile error %lu)", path,
++                         GetLastError());
+       return NULL;
++   }
+ 
+    void *map = NULL;
+    LARGE_INTEGER len, zero = {.QuadPart = 0}, want = {.QuadPart = (LONGLONG)size};
+-   if (!GetFileSizeEx(f, &len))
++   if (!GetFileSizeEx(f, &len)) {
++      disk_cache_os_note("cannot read the size of %s (error %lu)", path,
++                         GetLastError());
+       goto out;
++   }
+    if ((uint64_t)len.QuadPart != size) {
+       /* SetEndOfFile takes the clusters now: a full disk fails here and not
+        * later at a write into the mapping. */
+       if (!SetFilePointerEx(f, zero, NULL, FILE_BEGIN) || !SetEndOfFile(f) ||
+-          !SetFilePointerEx(f, want, NULL, FILE_BEGIN) || !SetEndOfFile(f))
++          !SetFilePointerEx(f, want, NULL, FILE_BEGIN) || !SetEndOfFile(f)) {
++         disk_cache_os_note("cannot make %s %llu bytes long (it has %llu; "
++                            "SetEndOfFile error %lu)", path,
++                            (unsigned long long)size,
++                            (unsigned long long)len.QuadPart, GetLastError());
+          goto out;
++      }
+    }
+ 
+    HANDLE m = CreateFileMappingW(f, NULL, PAGE_READWRITE, 0, 0, NULL);
+-   if (m) {
+-      map = MapViewOfFile(m, FILE_MAP_ALL_ACCESS, 0, 0, size);
+-      CloseHandle(m); /* the view keeps the mapping */
++   if (!m) {
++      disk_cache_os_note("cannot map %s (CreateFileMapping error %lu)", path,
++                         GetLastError());
++      goto out;
+    }
+ 
++   /* FILE_MAP_WRITE is a read-write view */
++   map = MapViewOfFile(m, FILE_MAP_WRITE, 0, 0, size);
++   if (!map)
++      disk_cache_os_note("cannot map %s (MapViewOfFile error %lu)", path,
++                         GetLastError());
++   CloseHandle(m); /* the view keeps the mapping */
++
+ out:
+    CloseHandle(f);
+    return map;
+@@ -439,22 +510,94 @@ dc_volume_bytes(const char *path)
+    return ok ? total.QuadPart : 0;
+ }
+ 
+-/* The directory the cache directory is made in when MESA_SHADER_CACHE_DIR is
+- * not set (ralloc), or NULL.  The W call: a user name need not fit the ANSI
+- * code page. */
+-static char *
+-dc_default_root(void *mem_ctx)
++/* An environment variable as UTF-8.  The W call: a user name need not fit
++ * the ANSI code page. */
++static bool
++dc_env_utf8(const WCHAR *name, char *out, size_t out_size)
+ {
+-   WCHAR w[MAX_PATH];
+-   DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", w, ARRAY_SIZE(w));
+-   if (n == 0 || n >= ARRAY_SIZE(w))
+-      return NULL;
++   WCHAR w[512];
++   DWORD n = GetEnvironmentVariableW(name, w, ARRAY_SIZE(w));
++   if (n == 0 || n >= ARRAY_SIZE(w)) {
++      dc_err = n ? ERROR_BUFFER_OVERFLOW : GetLastError();
++      return false;
++   }
++   if (!WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)out_size, NULL,
++                            NULL)) {
++      dc_err = GetLastError();
++      return false;
++   }
++   return true;
++}
+ 
+-   char u[MAX_PATH * 3 + 1];
+-   if (!WideCharToMultiByte(CP_UTF8, 0, w, -1, u, sizeof(u), NULL, NULL))
+-      return NULL;
++/* The i-th directory to make the cache directory in when
++ * MESA_SHADER_CACHE_DIR is not set, in the order they are tried:
++ *
++ *   0  %LOCALAPPDATA%\Starbite\shader-cache
++ *   1  %USERPROFILE%\AppData\Local\Starbite\shader-cache
++ *   2  C:\ProgramData\Starbite\shader-cache-<user name>
++ *
++ * Returns false when there is no i-th one.  *root (ralloc) stays NULL when
++ * this one cannot even be named (the variable is not set: noted).  *what is
++ * what the log calls it.  The last one is a directory every user of the
++ * machine can write to (the driver's logs live next to it); it is there for a
++ * process that has no profile directory at all.
++ */
++static bool
++dc_default_root(void *mem_ctx, unsigned i, char **root, const char **what)
++{
++   char u[512 * 3 + 1];
++
++   *root = NULL;
++   switch (i) {
++   case 0:
++      *what = "%LOCALAPPDATA%";
++      if (dc_env_utf8(L"LOCALAPPDATA", u, sizeof(u)))
++         *root = ralloc_asprintf(mem_ctx, "%s\\%s", u, DC_WIN_DEFAULT_SUBDIR);
++      else
++         disk_cache_os_note("%%LOCALAPPDATA%% cannot be read (error %lu)",
++                            dc_err);
++      return true;
++
++   case 1:
++      *what = "%USERPROFILE%\\AppData\\Local";
++      if (dc_env_utf8(L"USERPROFILE", u, sizeof(u)))
++         *root = ralloc_asprintf(mem_ctx, "%s\\AppData\\Local\\%s", u,
++                                 DC_WIN_DEFAULT_SUBDIR);
++      else
++         disk_cache_os_note("%%USERPROFILE%% cannot be read (error %lu)",
++                            dc_err);
++      return true;
++
++   case 2: {
++      WCHAR w[257];
++      DWORD n = ARRAY_SIZE(w);
++
++      *what = "C:\\ProgramData\\Starbite";
++      if (!GetUserNameW(w, &n) ||
++          !WideCharToMultiByte(CP_UTF8, 0, w, -1, u, sizeof(u), NULL, NULL)) {
++         if (!dc_env_utf8(L"USERNAME", u, sizeof(u)))
++            strcpy(u, "user");
++      }
++      /* a user name as one path component */
++      for (char *c = u; *c; c++) {
++         if ((unsigned char)*c < 0x20 || strchr("<>:\"/\\|?*", *c) ||
++             ((*c == ' ' || *c == '.') && !c[1]))
++            *c = '_';
++      }
++      *root = ralloc_asprintf(mem_ctx, "%s-%s", DC_WIN_SHARED_ROOT, u);
++      return true;
++   }
+ 
+-   return ralloc_asprintf(mem_ctx, "%s\\%s", u, DC_WIN_DEFAULT_SUBDIR);
++   default:
++      return false;
++   }
++}
++
++/* The other cache types are stubs that fail on Windows. */
++bool
++disk_cache_os_only_multi_file(void)
++{
++   return true;
+ }
+ 
+ static bool
+@@ -463,6 +606,8 @@ dc_is_sep(char c)
+    return c == '/' || c == '\\';
+ }
+ 
++#define DC_SEP "\\" /* for the one join that shows up in the log */
++
+ #else /* !DETECT_OS_WINDOWS: the same primitives for the unit tests */
+ 
+ #include <dirent.h>
+@@ -500,7 +645,31 @@ dc_is_dir(const char *path)
+ static bool
+ dc_mkdir(const char *path)
+ {
+-   return (mkdir(path, 0700) == 0 || errno == EEXIST) && dc_is_dir(path);
++   if (mkdir(path, 0700) != 0 && errno != EEXIST) {
++      dc_err = errno;
++      return false;
++   }
++   if (!dc_is_dir(path)) {
++      dc_err = ENOTDIR;
++      return false;
++   }
++   return true;
++}
++
++static bool
++dc_can_write_in(const char *dir)
++{
++   char *path = dc_asprintf("%s/index", dir);
++   if (!path)
++      return false;
++
++   int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
++   if (fd == -1)
++      dc_err = errno;
++   else
++      close(fd);
++   free(path);
++   return fd != -1;
+ }
+ 
+ static bool
+@@ -632,20 +801,27 @@ static void *
+ dc_map_shared(const char *path, size_t size)
+ {
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+-   if (fd == -1)
++   if (fd == -1) {
++      disk_cache_os_note("cannot open %s (errno %d)", path, errno);
+       return NULL;
++   }
+ 
+    void *map = NULL;
+    struct stat sb;
+    if (fstat(fd, &sb) == -1)
+       goto out;
+    if ((size_t)sb.st_size != size &&
+-       (ftruncate(fd, 0) == -1 || ftruncate(fd, size) == -1))
++       (ftruncate(fd, 0) == -1 || ftruncate(fd, size) == -1)) {
++      disk_cache_os_note("cannot make %s %zu bytes long (errno %d)", path,
++                         size, errno);
+       goto out;
++   }
+ 
+    map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+-   if (map == MAP_FAILED)
++   if (map == MAP_FAILED) {
++      disk_cache_os_note("cannot map %s (errno %d)", path, errno);
+       map = NULL;
++   }
+ 
+ out:
+    close(fd);
+@@ -667,15 +843,49 @@ dc_volume_bytes(const char *path)
+    return (uint64_t)vfs.f_blocks * vfs.f_frsize;
+ }
+ 
+-static char *
+-dc_default_root(void *mem_ctx)
++/* As on Windows, three places in order.  The second and third exist only for
++ * the unit tests (SB_DISK_CACHE_TEST_ROOT2 / _ROOT3), which run the same
++ * fall-back code that way. */
++static bool
++dc_default_root(void *mem_ctx, unsigned i, char **root, const char **what)
+ {
+-   const char *xdg = os_get_option_secure("XDG_CACHE_HOME");
+-   if (xdg)
+-      return ralloc_strdup(mem_ctx, xdg);
++   const char *v;
++
++   *root = NULL;
++   switch (i) {
++   case 0:
++      if ((v = os_get_option_secure("XDG_CACHE_HOME")) != NULL) {
++         *what = "XDG_CACHE_HOME";
++         *root = ralloc_strdup(mem_ctx, v);
++      } else if ((v = os_get_option("HOME")) != NULL) {
++         *what = "HOME/.cache";
++         *root = ralloc_asprintf(mem_ctx, "%s/.cache", v);
++      } else {
++         *what = "HOME/.cache";
++         disk_cache_os_note("neither XDG_CACHE_HOME nor HOME is set");
++      }
++      return true;
++
++   case 1:
++   case 2:
++      v = os_get_option(i == 1 ? "SB_DISK_CACHE_TEST_ROOT2"
++                               : "SB_DISK_CACHE_TEST_ROOT3");
++      if (!v)
++         return false;
++      *what = i == 1 ? "SB_DISK_CACHE_TEST_ROOT2" : "SB_DISK_CACHE_TEST_ROOT3";
++      *root = ralloc_strdup(mem_ctx, v);
++      return true;
++
++   default:
++      return false;
++   }
++}
+ 
+-   const char *home = os_get_option("HOME");
+-   return home ? ralloc_asprintf(mem_ctx, "%s/.cache", home) : NULL;
++/* The unit tests can ask for what Windows does. */
++bool
++disk_cache_os_only_multi_file(void)
++{
++   return os_get_option("SB_DISK_CACHE_TEST_ONLY_MULTI_FILE") != NULL;
+ }
+ 
+ static bool
+@@ -684,6 +894,8 @@ dc_is_sep(char c)
+    return c == '/';
+ }
+ 
++#define DC_SEP "/"
++
+ #endif /* DETECT_OS_WINDOWS */
+ 
+ /* ------------------------------------------------------------------------
+@@ -698,6 +910,10 @@ dc_mkdir_p(const char *path)
+    if (dc_is_dir(path) || dc_mkdir(path))
+       return true;
+ 
++   /* Most likely the parent is missing; if it is not, the second dc_mkdir
++    * below fails the same way and that is the error to report. */
++   const unsigned long first_err = dc_err;
++
+    size_t n = strlen(path);
+    while (n > 0 && dc_is_sep(path[n - 1]))
+       n--;
+@@ -705,18 +921,25 @@ dc_mkdir_p(const char *path)
+       n--;
+    while (n > 0 && dc_is_sep(path[n - 1]))
+       n--;
+-   if (n == 0)
+-      return false;
+ 
+-   char *parent = malloc(n + 1);
+-   if (!parent)
++   char *parent = n ? malloc(n + 1) : NULL;
++   if (!parent) {
++      disk_cache_os_note("cannot create %s (error %lu)", path, first_err);
+       return false;
++   }
+    memcpy(parent, path, n);
+    parent[n] = '\0';
+ 
+-   bool ok = dc_mkdir_p(parent);
++   bool ok = dc_mkdir_p(parent); /* notes its own failure */
+    free(parent);
+-   return ok && dc_mkdir(path);
++   if (!ok)
++      return false;
++
++   if (!dc_mkdir(path)) {
++      disk_cache_os_note("cannot create %s (error %lu)", path, dc_err);
++      return false;
++   }
++   return true;
+ }
+ 
+ static bool
+@@ -1014,12 +1237,16 @@ done:
+ 
+ /* Determine path for cache based on the first defined name as follows:
+  *
+- *   $MESA_SHADER_CACHE_DIR/mesa_shader_cache
+- *   Windows: %LOCALAPPDATA%\Starbite\shader-cache\mesa_shader_cache
++ *   $MESA_SHADER_CACHE_DIR/mesa_shader_cache      (UTF-8; no stand-in)
++ *   Windows, the first of these that a file can be created in:
++ *      %LOCALAPPDATA%\Starbite\shader-cache\mesa_shader_cache
++ *      %USERPROFILE%\AppData\Local\Starbite\shader-cache\mesa_shader_cache
++ *      C:\ProgramData\Starbite\shader-cache-<user>\mesa_shader_cache
+  *   (POSIX, unit tests: $XDG_CACHE_HOME or $HOME/.cache, then the same name)
+  *
+- * MESA_SHADER_CACHE_DIR is taken as UTF-8.  Returns NULL when the directory
+- * is not there and cannot be made: the cache is then off for this process.
++ * Returns NULL when none can be used: the cache is then off for this process.
++ * Why each place that was tried was not taken is noted (disk_cache_os_note),
++ * and which one was taken (disk_cache_os_dir_source).
+  */
+ const char *
+ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
+@@ -1038,22 +1265,51 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
+ 
+    /* os_get_option's result does not outlive the next call on Windows */
+    const char *env = os_get_option_secure("MESA_SHADER_CACHE_DIR");
+-   char *root = env ? ralloc_strdup(mem_ctx, env) : dc_default_root(mem_ctx);
+-   if (!root)
+-      return NULL;
++   char *env_root = env ? ralloc_strdup(mem_ctx, env) : NULL;
+ 
+-   char *path = ralloc_asprintf(mem_ctx, "%s/%s", root, cache_dir_name);
+-   if (path && cache_type == DISK_CACHE_SINGLE_FILE)
+-      path = ralloc_asprintf(mem_ctx, "%s/%s/%s", path, driver_id, gpu_name);
+-   if (!path)
+-      return NULL;
++   for (unsigned i = 0;; i++) {
++      char *root;
++      const char *what;
+ 
+-   if (mkdir ? dc_mkdir_p(path) : dc_is_dir(path))
++      if (env) {
++         /* a directory that was asked for by name has no stand-in */
++         if (i > 0)
++            break;
++         root = env_root;
++         what = "MESA_SHADER_CACHE_DIR";
++      } else if (!dc_default_root(mem_ctx, i, &root, &what)) {
++         break;
++      }
++      if (!root)
++         continue;
++
++      char *path = ralloc_asprintf(mem_ctx, "%s" DC_SEP "%s", root, cache_dir_name);
++      if (path && cache_type == DISK_CACHE_SINGLE_FILE)
++         path = ralloc_asprintf(mem_ctx, "%s/%s/%s", path, driver_id, gpu_name);
++      if (!path)
++         continue;
++
++      if (!mkdir) {
++         if (dc_is_dir(path))
++            return path;
++         continue;
++      }
++
++      if (!dc_mkdir_p(path)) /* noted */
++         continue;
++
++      /* A directory we may look into but not write to is no use; and that
++       * shows only when a file is made. */
++      if (cache_type == DISK_CACHE_MULTI_FILE && !dc_can_write_in(path)) {
++         disk_cache_os_note("cannot create a file in %s (error %lu)", path,
++                            dc_err);
++         continue;
++      }
++
++      disk_cache_os_set_dir_source(what);
+       return path;
++   }
+ 
+-   if (mkdir)
+-      fprintf(stderr, "Failed to create %s for shader cache---disabling.\n",
+-              path);
+    return NULL;
+ }
+ 
+diff --git a/src/util/tests/cache_test.cpp b/src/util/tests/cache_test.cpp
+index 6173453..d643765 100644
+--- a/src/util/tests/cache_test.cpp
++++ b/src/util/tests/cache_test.cpp
+@@ -2265,3 +2265,281 @@ TEST(SbPeIdentity, RealBuildsDiffer)
+       }
+    }
+ }
++
++/* ------------------------------------------------------------------------
++ * sb-patches/0173, after the first run on a phone (T89): the cache was off
++ * and nothing said why.  Steam had started the game with
++ * MESA_DISK_CACHE_SINGLE_FILE=1, a cache type that is a failing stub on
++ * Windows.
++ * ------------------------------------------------------------------------ */
++
++#ifdef ENABLE_SHADER_CACHE
++static bool
++sb_notes_have(const char *what)
++{
++   return strstr(disk_cache_os_notes(), what) != NULL;
++}
++
++static void
++sb_env_clear(void)
++{
++   static const char *const names[] = {
++      "MESA_DISK_CACHE_SINGLE_FILE", "MESA_DISK_CACHE_DATABASE", "MESA_DISK_CACHE_MULTI_FILE",
++      "MESA_DISK_CACHE_COMBINE_RW_WITH_RO_FOZ", "MESA_DISK_CACHE_READ_ONLY_FOZ_DBS",
++      "MESA_SHADER_CACHE_DIR", "MESA_SHADER_CACHE_MAX_SIZE", "MESA_SHADER_CACHE_DISABLE",
++      "SB_DISK_CACHE_TEST_ONLY_MULTI_FILE", "SB_DISK_CACHE_TEST_ROOT2", "SB_DISK_CACHE_TEST_ROOT3",
++      "XDG_CACHE_HOME",
++   };
++   for (const char *n : names)
++      os_unset_option(n);
++#ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
++   os_set_option("MESA_SHADER_CACHE_DISABLE", "false", true);
++#endif
++}
++#endif
++
++/* What Steam puts into a game's environment does not switch the cache off
++ * where the multi-file cache is the only one (Windows; here by the test
++ * switch): the cache is on, of the multi-file type, and it works. */
++TEST_F(Cache, SbLauncherEnvironmentDoesNotSwitchOff)
++{
++#ifndef ENABLE_SHADER_CACHE
++   GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
++#elif !DISK_CACHE_OS_PORTABLE
++   GTEST_SKIP() << "only disk_cache_os_portable.c does this.";
++#else
++   const char data[] = "a compiled shader";
++   cache_key key;
++
++   rmrf_local(CACHE_TEST_TMP);
++   sb_env_clear();
++   os_set_option("MESA_SHADER_CACHE_DIR", CACHE_TEST_TMP "/steam", true);
++   os_set_option("SB_DISK_CACHE_TEST_ONLY_MULTI_FILE", "1", true);
++
++   /* the environment of a game started by Steam */
++   os_set_option("MESA_DISK_CACHE_SINGLE_FILE", "1", true);
++   os_set_option("MESA_DISK_CACHE_COMBINE_RW_WITH_RO_FOZ", "1", true);
++   os_set_option("MESA_DISK_CACHE_READ_ONLY_FOZ_DBS", "steam_cache,steam_precompiled", true);
++
++   for (int start = 0; start < 2; start++) {
++      struct disk_cache *cache = disk_cache_create("test", "build-1", 0);
++      ASSERT_NE(cache, nullptr);
++      EXPECT_FALSE(cache->path_init_failed) << disk_cache_os_notes();
++      EXPECT_EQ(cache->type, DISK_CACHE_MULTI_FILE);
++      EXPECT_EQ(cache->foz_ro_cache, nullptr);
++      EXPECT_TRUE(sb_notes_have("MESA_DISK_CACHE_SINGLE_FILE in the environment ignored"))
++         << disk_cache_os_notes();
++      EXPECT_STREQ(disk_cache_os_dir_source(), "MESA_SHADER_CACHE_DIR");
++
++      disk_cache_compute_key(cache, data, sizeof(data), key);
++      char *back = (char *)disk_cache_get(cache, key, NULL);
++      if (start == 0) {
++         EXPECT_EQ(back, nullptr);
++         sb_put(cache, key, data, sizeof(data));
++      } else {
++         ASSERT_NE(back, nullptr) << "second start: no hit";
++         EXPECT_STREQ(back, data);
++      }
++      free(back);
++      disk_cache_destroy(cache);
++   }
++
++   /* the database type is as absent as the single-file type */
++   os_unset_option("MESA_DISK_CACHE_SINGLE_FILE");
++   os_set_option("MESA_DISK_CACHE_DATABASE", "true", true);
++   struct disk_cache *cache = disk_cache_create("test", "build-1", 0);
++   ASSERT_NE(cache, nullptr);
++   EXPECT_EQ(cache->type, DISK_CACHE_MULTI_FILE);
++   EXPECT_FALSE(cache->path_init_failed) << disk_cache_os_notes();
++   EXPECT_TRUE(sb_notes_have("MESA_DISK_CACHE_DATABASE in the environment ignored"));
++   disk_cache_destroy(cache);
++   os_unset_option("MESA_DISK_CACHE_DATABASE");
++
++   /* "no multi-file cache" is still a way to say no cache, and says so */
++   os_set_option("MESA_DISK_CACHE_MULTI_FILE", "false", true);
++   cache = disk_cache_create("test", "build-1", 0);
++   EXPECT_EQ(cache, nullptr);
++   EXPECT_TRUE(sb_notes_have("switched off by MESA_DISK_CACHE_MULTI_FILE")) << disk_cache_os_notes();
++   disk_cache_destroy(cache);
++
++   /* without the switch (a POSIX build) the environment is obeyed as before */
++   sb_env_clear();
++   os_set_option("MESA_SHADER_CACHE_DIR", CACHE_TEST_TMP "/steam", true);
++   os_set_option("MESA_DISK_CACHE_SINGLE_FILE", "1", true);
++   cache = disk_cache_create("test", "build-1", 0);
++   ASSERT_NE(cache, nullptr);
++#ifdef FOZ_DB_UTIL
++   EXPECT_EQ(cache->type, DISK_CACHE_SINGLE_FILE);
++#endif
++   disk_cache_destroy(cache);
++
++   sb_env_clear();
++   rmrf_local(CACHE_TEST_TMP);
++#endif
++}
++
++/* A cache that is off says which step gave up, with the path and the
++ * system's error code. */
++TEST_F(Cache, SbOffSaysWhy)
++{
++#ifndef ENABLE_SHADER_CACHE
++   GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
++#else
++   rmrf_local(CACHE_TEST_TMP);
++   ASSERT_EQ(mkdir(CACHE_TEST_TMP, 0755), 0);
++   sb_env_clear();
++   os_set_option("MESA_DISK_CACHE_MULTI_FILE", "true", true);
++
++   /* switched off */
++   os_set_option("MESA_SHADER_CACHE_DIR", CACHE_TEST_TMP "/why", true);
++   os_set_option("MESA_SHADER_CACHE_DISABLE", "true", true);
++   struct disk_cache *cache = disk_cache_create("test", "build-1", 0);
++   ASSERT_NE(cache, nullptr);
++   EXPECT_TRUE(cache->path_init_failed);
++   EXPECT_TRUE(sb_notes_have("switched off by MESA_SHADER_CACHE_DISABLE in the environment"))
++      << disk_cache_os_notes();
++   disk_cache_destroy(cache);
++   os_set_option("MESA_SHADER_CACHE_DISABLE", "false", true);
++
++   /* a cache that is on has nothing to say */
++   cache = disk_cache_create("test", "build-1", 0);
++   ASSERT_NE(cache, nullptr);
++   EXPECT_FALSE(cache->path_init_failed);
++   EXPECT_STREQ(disk_cache_os_notes(), "");
++   disk_cache_destroy(cache);
++
++#if DISK_CACHE_OS_PORTABLE
++   EXPECT_STREQ(disk_cache_os_dir_source(), "MESA_SHADER_CACHE_DIR");
++
++   /* the directory cannot be made: which one, and the error (ENOTDIR = 20) */
++   FILE *f = fopen(CACHE_TEST_TMP "/a-file", "w");
++   ASSERT_NE(f, nullptr);
++   fclose(f);
++   os_set_option("MESA_SHADER_CACHE_DIR", CACHE_TEST_TMP "/a-file/below", true);
++   cache = disk_cache_create("test", "build-1", 0);
++   ASSERT_NE(cache, nullptr);
++   EXPECT_TRUE(cache->path_init_failed);
++   EXPECT_TRUE(sb_notes_have("cannot create " CACHE_TEST_TMP "/a-file (error 20)")) << disk_cache_os_notes();
++   disk_cache_destroy(cache);
++
++   /* the directory is there but nothing can be written (EACCES = 13) */
++   if (geteuid() != 0) {
++      ASSERT_EQ(mkdir(CACHE_TEST_TMP "/locked", 0755), 0);
++      ASSERT_EQ(mkdir(CACHE_TEST_TMP "/locked/" CACHE_DIR_NAME, 0555), 0);
++      os_set_option("MESA_SHADER_CACHE_DIR", CACHE_TEST_TMP "/locked", true);
++      cache = disk_cache_create("test", "build-1", 0);
++      ASSERT_NE(cache, nullptr);
++      EXPECT_TRUE(cache->path_init_failed);
++      EXPECT_TRUE(sb_notes_have("cannot create a file in " CACHE_TEST_TMP "/locked/" CACHE_DIR_NAME " (error 13)"))
++         << disk_cache_os_notes();
++      disk_cache_destroy(cache);
++      chmod(CACHE_TEST_TMP "/locked/" CACHE_DIR_NAME, 0755);
++   }
++
++   /* the index cannot be a file: its name is taken by a directory (EISDIR = 21) */
++   ASSERT_EQ(mkdir(CACHE_TEST_TMP "/idx", 0755), 0);
++   ASSERT_EQ(mkdir(CACHE_TEST_TMP "/idx/" CACHE_DIR_NAME, 0755), 0);
++   ASSERT_EQ(mkdir(CACHE_TEST_TMP "/idx/" CACHE_DIR_NAME "/index", 0755), 0);
++   os_set_option("MESA_SHADER_CACHE_DIR", CACHE_TEST_TMP "/idx", true);
++   cache = disk_cache_create("test", "build-1", 0);
++   ASSERT_NE(cache, nullptr);
++   EXPECT_TRUE(cache->path_init_failed);
++   EXPECT_TRUE(sb_notes_have("cannot create a file in " CACHE_TEST_TMP "/idx/" CACHE_DIR_NAME " (error 21)"))
++      << disk_cache_os_notes();
++   disk_cache_destroy(cache);
++#endif
++
++   sb_env_clear();
++   rmrf_local(CACHE_TEST_TMP);
++#endif
++}
++
++/* The directory has stand-ins: the first place a file can be created in is
++ * taken, and the places passed over are named with their errors.  (On
++ * Windows: %LOCALAPPDATA%, %USERPROFILE%\AppData\Local,
++ * C:\ProgramData\Starbite\shader-cache-<user>; here the same loop over
++ * XDG_CACHE_HOME and two test variables.) */
++TEST_F(Cache, SbDirectoryStandIns)
++{
++#ifndef ENABLE_SHADER_CACHE
++   GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
++#elif !DISK_CACHE_OS_PORTABLE
++   GTEST_SKIP() << "only disk_cache_os_portable.c does this.";
++#else
++   if (geteuid() == 0)
++      GTEST_SKIP() << "root can write anywhere.";
++
++   const char data[] = "a compiled shader";
++   cache_key key;
++
++   rmrf_local(CACHE_TEST_TMP);
++   ASSERT_EQ(mkdir(CACHE_TEST_TMP, 0755), 0);
++   sb_env_clear();
++   os_set_option("MESA_DISK_CACHE_MULTI_FILE", "true", true);
++
++   FILE *f = fopen(CACHE_TEST_TMP "/a-file", "w");
++   ASSERT_NE(f, nullptr);
++   fclose(f);
++   ASSERT_EQ(mkdir(CACHE_TEST_TMP "/locked", 0555), 0);
++
++   /* first place: cannot be made; second: cannot be written; third: fine */
++   os_set_option("XDG_CACHE_HOME", CACHE_TEST_TMP "/a-file/below", true);
++   os_set_option("SB_DISK_CACHE_TEST_ROOT2", CACHE_TEST_TMP "/locked", true);
++   os_set_option("SB_DISK_CACHE_TEST_ROOT3", CACHE_TEST_TMP "/third", true);
++
++   for (int start = 0; start < 2; start++) {
++      struct disk_cache *cache = disk_cache_create("test", "build-1", 0);
++      ASSERT_NE(cache, nullptr);
++      ASSERT_FALSE(cache->path_init_failed) << disk_cache_os_notes();
++      EXPECT_STREQ(cache->path, CACHE_TEST_TMP "/third/" CACHE_DIR_NAME);
++      EXPECT_STREQ(disk_cache_os_dir_source(), "SB_DISK_CACHE_TEST_ROOT3");
++      EXPECT_TRUE(sb_notes_have("cannot create " CACHE_TEST_TMP "/a-file (error 20)")) << disk_cache_os_notes();
++      EXPECT_TRUE(sb_notes_have("cannot create " CACHE_TEST_TMP "/locked/" CACHE_DIR_NAME " (error 13)"))
++         << disk_cache_os_notes();
++
++      disk_cache_compute_key(cache, data, sizeof(data), key);
++      char *back = (char *)disk_cache_get(cache, key, NULL);
++      if (start == 0)
++         sb_put(cache, key, data, sizeof(data));
++      else
++         EXPECT_NE(back, nullptr) << "second start: no hit in the stand-in directory";
++      free(back);
++      disk_cache_destroy(cache);
++   }
++
++   /* the first place becomes usable: it is taken, nothing to note */
++   os_set_option("XDG_CACHE_HOME", CACHE_TEST_TMP "/first", true);
++   struct disk_cache *cache = disk_cache_create("test", "build-1", 0);
++   ASSERT_NE(cache, nullptr);
++   EXPECT_FALSE(cache->path_init_failed);
++   EXPECT_STREQ(cache->path, CACHE_TEST_TMP "/first/" CACHE_DIR_NAME);
++   EXPECT_STREQ(disk_cache_os_dir_source(), "XDG_CACHE_HOME");
++   EXPECT_STREQ(disk_cache_os_notes(), "");
++   disk_cache_destroy(cache);
++
++   /* no place works: off, and all three say why */
++   os_set_option("XDG_CACHE_HOME", CACHE_TEST_TMP "/a-file/below", true);
++   os_set_option("SB_DISK_CACHE_TEST_ROOT3", CACHE_TEST_TMP "/a-file/third", true);
++   cache = disk_cache_create("test", "build-1", 0);
++   ASSERT_NE(cache, nullptr);
++   EXPECT_TRUE(cache->path_init_failed);
++   EXPECT_TRUE(sb_notes_have("/locked/")) << disk_cache_os_notes();
++   const char *first = strstr(disk_cache_os_notes(), "cannot create " CACHE_TEST_TMP "/a-file (error 20)");
++   ASSERT_NE(first, nullptr) << disk_cache_os_notes();
++   EXPECT_NE(strstr(first + 1, "cannot create " CACHE_TEST_TMP "/a-file (error 20)"), nullptr)
++      << "the third place is not in: " << disk_cache_os_notes();
++   disk_cache_destroy(cache);
++
++   /* a directory asked for by name has no stand-in */
++   os_set_option("SB_DISK_CACHE_TEST_ROOT3", CACHE_TEST_TMP "/third", true);
++   os_set_option("MESA_SHADER_CACHE_DIR", CACHE_TEST_TMP "/a-file/named", true);
++   cache = disk_cache_create("test", "build-1", 0);
++   ASSERT_NE(cache, nullptr);
++   EXPECT_TRUE(cache->path_init_failed);
++   disk_cache_destroy(cache);
++
++   chmod(CACHE_TEST_TMP "/locked", 0755);
++   sb_env_clear();
++   rmrf_local(CACHE_TEST_TMP);
++#endif
 +}
 -- 
 2.43.0

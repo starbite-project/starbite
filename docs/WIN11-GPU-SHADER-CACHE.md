@@ -1,5 +1,9 @@
 # Shader disk cache on Windows (gap-list item 9)
 
+**Update 2026-11-16 20:35 EET: the kit ran on the phone (T89) and the cache stayed off. Section 10 at the end says
+why, what changed (commit 0173, new kit) and what the log prints now; where it differs from sections 2-7 (log
+lines, the driver id of the kit, `MESA_SHADER_CACHE_DIR`), section 10 is right.**
+
 2026-11-16 17:40 EET. GL kit built with a persistent on-disk shader cache; the D3D driver (sbumd) analysed, not
 built. **Nothing here has run on Windows or on a phone**: the Windows file code is compiled only. Everything else
 (the cache logic that Windows uses, the entry format, the driver identity, the GL path end to end) ran on the Linux
@@ -292,3 +296,141 @@ copies I could not delete from here). No existing tree or build directory was to
 The kit in `build/win/gd-kit-ec-cache/` is the reference (its SHA256SUMS matched the VM's files when copied).
 `build-cache-ec` will relink at its next run (I recompiled a few objects after the copy to list their warnings),
 and **any relink is a new link stamp and so a new driver id**: copy DLLs, maps and `driver-id.txt` together.
+
+## 10. T89 on the phone and what changed
+
+2026-11-16 20:35 EET. Kit rebuilt and delivered to the same place; commit 0173 (f2e5052) on `sb-cache`; patches
+re-exported (three files now). Still nothing of mine has run on Windows: what follows is the phone's own log read
+against the source, and host tests of the fix.
+
+### What failed (from the logs in `build/win/results-t89/ours/pre/umdlog/`)
+
+Runs A and B (pid 2884, 6472) have one line that the summary of T89 did not quote, directly before the "off" line:
+
+```
+Warning: Mesa single file cache selected but Mesa wasn't built with single cache file support. Shader cache will be disabled!
+sbumd: shader cache: off (switched off, or its directory cannot be used); 20.9 s after process start
+```
+
+That text exists once in Mesa: `foz_prepare`, the Windows stub of the single-file (Fossilize) cache
+(`src/util/fossilize_db.c:765`). It is reached only when the cache type is "single file", and the type comes from
+the environment: `debug_get_bool_option("MESA_DISK_CACHE_SINGLE_FILE", false)` in `disk_cache_create`
+(`src/util/disk_cache.c:255`), then `disk_cache_load_cache_index_foz` (`disk_cache.c:164`) fails and the cache
+object comes back unusable. Run C (flag file) has no such line because a switched-off cache never gets as far as
+its type. So:
+
+- **Certain** (it is in the log): the game's process had `MESA_DISK_CACHE_SINGLE_FILE` set to true, Mesa picked a
+  cache type that does not exist on Windows, and my code let that end in "no cache" with a message that named
+  neither the variable nor the step. My directory, index and identity code was never reached (the identity was:
+  it passed).
+- **Inferred, not seen**: that Steam put the variable there. Steam hands its games a block of shader-cache
+  variables on Linux (`MESA_DISK_CACHE_SINGLE_FILE=1` among them, with a cache directory and a size); the game
+  was started by Steam. The next run prints the variables it finds, which settles it.
+- The only other way to that warning is `MESA_DISK_CACHE_COMBINE_RW_WITH_RO_FOZ` (`disk_cache.c:329`), which
+  makes a second, read-only cache of that type; then the main cache would have had to fail as well, silently.
+  Possible, less likely; the new log distinguishes the two.
+- **Not known**: whether the steps after the type work on Windows (directory, index file, mapping, writing
+  entries). T89 never got there. The first run with this kit is the first test of them.
+
+What T89 did confirm: stderr reaches the umdlog, the flag file works, the first-frame hook fires (21.5 s / 19.2 s
+without cache, 13.8 s in run C), the PE identity can be computed in the x64 process.
+
+### Every step of the enable path that could fail without saying why (T89 tree, 8909baf)
+
+| # | Step | Where | In T89 |
+|---|---|---|---|
+| 1 | cache type from the environment: single file / database are failing stubs on Windows | `disk_cache.c:255`, `:257` → `:164` → `fossilize_db.c:763` | **this one** |
+| 2 | `MESA_DISK_CACHE_MULTI_FILE=false`: `disk_cache_create` returns NULL | `disk_cache.c:265` | silent |
+| 3 | read-only Fossilize cache next to the main one | `disk_cache.c:329` | prints the same warning |
+| 4 | `MESA_SHADER_CACHE_DISABLE`, `MESA_GLSL_CACHE_DISABLE`, `MESA_GLSL_DISABLE_IO_OPT` | `disk_cache_os.c:1238`, `:1252` | silent |
+| 5 | `MESA_SHADER_CACHE_DIR` from the environment decides the directory (read as ANSI, used as UTF-8) | `disk_cache_os_portable.c:1040` | silent; a launcher's directory would have been used |
+| 6 | `MESA_SHADER_CACHE_MAX_SIZE` from the environment replaces the 64 MiB | `disk_cache.c:271` | silent; not a failure, but a launcher's "5G" would have lifted the bound |
+| 7 | `%LOCALAPPDATA%` not set or 260+ characters | `disk_cache_os_portable.c:446`, `:449` | silent, no other place tried |
+| 8 | directory cannot be made | `disk_cache_os_portable.c:696`, `:1055` | printed, without the error code |
+| 9 | index file: `CreateFileW`, `SetEndOfFile`, `CreateFileMappingW`, `MapViewOfFile` | `disk_cache_os_portable.c:386`, `:406`, `:411`, `:413` | silent |
+| 10 | cache thread cannot start | `disk_cache.c:189` | silent |
+| 11 | driver identity | `disk_cache_os.c:165`, `pan_disk_cache.c:295` | printed without the error; passed on the phone |
+| 12 | one message for every cause | `pan_disk_cache.c:342` | "switched off, or its directory cannot be used" |
+| 13 | the GL switch said something only when off | `wgl.c:118`-`124` | no line in runs A, B |
+
+Not candidates: `__normal_user()` is always true on Windows; `-Dshader-cache-default` is on (no
+`SHADER_CACHE_DISABLE_BY_DEFAULT` in the build).
+
+### What changed (0173)
+
+1. **The cache type** (`disk_cache.c`): where the multi-file cache is the only one
+   (`disk_cache_os_only_multi_file()`: Windows), `disk_cache_create` takes it whatever the environment asks for,
+   notes what it ignored, and makes no read-only Fossilize cache. `MESA_DISK_CACHE_MULTI_FILE=false` still means
+   no cache, and says so.
+2. **Launcher variables** (`wgl.c`): the Mesa cache variables found in the environment are listed in the decision
+   line. `MESA_SHADER_CACHE_DIR`, `MESA_GLSL_CACHE_DIR`, `MESA_SHADER_CACHE_MAX_SIZE`, `MESA_GLSL_CACHE_MAX_SIZE`
+   are removed from the process before the cache is made, so the directory and the 64 MiB are ours. For tests:
+   `SB_GL_SHADER_CACHE_DIR`, `SB_GL_SHADER_CACHE_MAX`. `MESA_SHADER_CACHE_DISABLE=true` is still honoured ("off"
+   counts whoever says it). The flag file no longer goes through the environment: it is a reason handed to
+   Panfrost, which makes no cache at all.
+3. **Reasons** (`disk_cache_os_note`, util): every step in the table writes which step, which path and the
+   system error; Panfrost prints them.
+4. **Directory stand-ins** (`dc_default_root`, `disk_cache_generate_cache_dir`): tried in order, and a place is
+   taken only when a file can be created in it (the index file, made right there):
+   `%LOCALAPPDATA%\Starbite\shader-cache`, `%USERPROFILE%\AppData\Local\Starbite\shader-cache`,
+   `C:\ProgramData\Starbite\shader-cache-<user name>` (`GetUserNameW`, else `%USERNAME%`, else `user`; characters
+   that cannot be in a file name become `_`). Then `\mesa_shader_cache` as before. The third place is writable by
+   every account of the machine: fine for one user on a phone, not something to rely on for sbumd (section 8.5).
+   A directory given by name (`SB_GL_SHADER_CACHE_DIR`) has no stand-in.
+5. **One decision line per process, always**, from `pan_disk_cache.c`; every cache line now starts
+   `sbumd: gl shader cache:` (was `sbumd: shader cache:`; `grep "shader cache:"` finds both).
+6. `MapViewOfFile` asks for `FILE_MAP_WRITE` instead of `FILE_MAP_ALL_ACCESS` (the same read-write view, the
+   plainer request).
+
+### What the next run prints
+
+Exactly one of these, once, when the screen is made:
+
+```
+sbumd: gl shader cache: on, dir C:\Users\<u>\AppData\Local\Starbite\shader-cache\mesa_shader_cache (from %LOCALAPPDATA%), limit 64 MiB, driver id 78f187c7…795c46 (link stamp 0x6afb4c74, Mesa 26.2.6 (git-f2e5052c2c)), flags 0x…; passed over: MESA_DISK_CACHE_SINGLE_FILE in the environment ignored; environment at start: MESA_DISK_CACHE_SINGLE_FILE=1 … (type, directory and size from it are not used); 20.9 s after process start
+sbumd: gl shader cache: OFF: switched off by C:\ProgramData\Starbite\glnocache; …
+sbumd: gl shader cache: OFF: switched off by SB_GL_SHADER_CACHE=0; …
+sbumd: gl shader cache: OFF: switched off by MESA_SHADER_CACHE_DISABLE in the environment; …
+sbumd: gl shader cache: OFF: no build identity for this module (its PE headers cannot be read, error N); …
+sbumd: gl shader cache: OFF: <one note per place tried, joined by "; ">; …
+```
+
+`passed over:` and `environment at start:` appear only when there is something to say. With a stand-in directory
+the "on" line reads e.g. `dir C:\ProgramData\Starbite\shader-cache-<u>\mesa_shader_cache (from
+C:\ProgramData\Starbite) … passed over: %LOCALAPPDATA% cannot be read (error 203); cannot create
+C:\Users\<u>\AppData\Local\Starbite (error 5)`. The notes a step can write:
+
+| Note | Step |
+|---|---|
+| `%LOCALAPPDATA% cannot be read (error N)`, same for `%USERPROFILE%` | variable not set (203) or too long (111) |
+| `cannot create <dir> (error N)` | the first directory of the chain that `CreateDirectoryW` refused (5 = access denied, 267 = a file has the name) |
+| `cannot create a file in <dir> (error N)` | the directory is there but the index file cannot be created or opened for writing |
+| `cannot open <index> (CreateFile error N)`, `cannot make <index> 2097160 bytes long (… SetEndOfFile error N)` (112 = disk full), `cannot map <index> (CreateFileMapping error N)` / `(MapViewOfFile error N)` | the index file |
+| `the thread that writes the cache cannot be started` | the queue |
+| `switched off by … in the environment`, `MESA_DISK_CACHE_… in the environment ignored` | switches |
+| `the cache came back unusable and no step said why` | a hole in the above; should never appear |
+
+The other lines are as in section 4 with the new prefix (`so far`, `first frame`, `process end`,
+`off; first frame`). For the kit as delivered: `gd-kit-ec-cache/driver-id.txt`
+(`driver id 78f187c7160f523e…28795c46`, link stamp `0x6afb4c74`).
+
+### Tests after the change
+
+- Compiled only (ARM64EC), as before, now including `GetUserNameW` (the one new import, from `ADVAPI32.dll`,
+  which the DLL already used: 286 imports from 15 DLLs, exports unchanged), the wgl hook and the decision line. No
+  new warning.
+- Host, Windows backend on POSIX primitives: `Cache.*` + `SbPeIdentity.*` 20 passed, 1 skipped; whole
+  `util_tests` 264 passed. Host, Mesa's POSIX backend with zlib: 18 passed, 3 skipped; whole `util_tests` 262
+  passed.
+- New unit tests: `SbLauncherEnvironmentDoesNotSwitchOff` (the Steam variables with the "only multi-file" rule
+  on: cache on, multi-file, a hit at the second start, the note is there; database type the same;
+  `MULTI_FILE=false` is off with its reason; without the rule the environment is obeyed as upstream does),
+  `SbOffSaysWhy` (switch; directory below a file → `cannot create … (error 20)`; read-only → `cannot create a
+  file in … (error 13)`; index name taken by a directory → `(error 21)`; a working cache has no notes),
+  `SbDirectoryStandIns` (first place cannot be made, second cannot be written, third taken, with both reasons
+  and the source; all three unusable → off with three reasons; a named directory has no stand-in).
+- GL scenarios 9 and 10 added to `host-test/glscenarios.sh` (the Steam environment; the stand-in chain): second
+  start 144 hits / 0 misses in both, digest equal to the cache-off run; scenarios 1-8 unchanged, all OK.
+
+What the host cannot show: that `only multi-file` is what Windows needs beyond T89's log line (the stub itself
+is Windows code), and the Win32 calls of the stand-in chain.
