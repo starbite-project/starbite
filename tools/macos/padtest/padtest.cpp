@@ -1,6 +1,6 @@
 // Host test of the XNU touch driver's trackpad gestures (pending patch 0460) and the keyboard summon swipe:
 // the driver's own code (pad_cut.inc, cut by extract.py) driven with touch samples; the HID events it sends
-// are checked.   padtest GESTURES(0|1)
+// are checked.   padtest SWEETPAD   (0 off, 1 three-finger swipes, 2 scrolling in points, 3 both)
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -22,12 +22,15 @@ static uint64_t now_ns = 1000000000;
 static uint64_t mach_absolute_time() { return now_ns; }
 static void absolutetime_to_nanoseconds(uint64_t a, uint64_t *o) { *o = a; }
 static int cfg_gestures;
+#define POINTS (cfg_gestures & 2)
+#define SWIPES (cfg_gestures & 1)
 static bool PE_parse_boot_argn(const char *name, void *v, int) { if (!strcmp(name, "sweetpad")) { *(int *)v = cfg_gestures; return true; } return false; }
 struct IOLock; static void IOLockLock(IOLock *) {} static void IOLockUnlock(IOLock *) {}
 static void sweet_canvas(int *w, int *h) { *w = 1440; *h = 2960; }
 
 struct Ev { char kind; int64_t x, y; uint32_t a, b; };  // 'p' pointer (x,y,buttons,old), 's' line scroll, 'f' fixed scroll (x,y 16.16, options), 'k' key (usage, down)
 static std::vector<Ev> out;
+static int phase_events;
 struct IOHIDEvent {
 	Ev e;
 	static IOHIDEvent *mk(char k, int64_t x, int64_t y, uint32_t a, uint32_t b) { IOHIDEvent *v = new IOHIDEvent(); v->e = { k, x, y, a, b }; return v; }
@@ -41,7 +44,8 @@ static SweetHIDKeyboard kb; static SweetHIDKeyboard *gSweetKeyboard = &kb;
 struct Timer { int ms = 0; void setTimeoutMS(int m) { ms = m; } };
 struct SweetHIDTouch {
 	IOLock *fLock = nullptr; int fLogicalW = 1440, fPanelW = 1440; Timer steer, *fSteer = &steer;
-	void dispatchEvent(IOHIDEvent *e) { out.push_back(e->e); }
+	// 0465: whatever the mode, no scroll event may carry a gesture phase or a momentum flag (S6i: AppKit aborts the app)
+	void dispatchEvent(IOHIDEvent *e) { if ((e->e.kind == 'f' || e->e.kind == 's') && (e->e.a & 0xff000300u)) phase_events++; out.push_back(e->e); }
 	void padTouch(int finger, bool down, int x, int y);
 	void padTick(void);
 };
@@ -72,7 +76,7 @@ static void scroll2(int px, int step_ms, int pause_ms) {
 
 static void test_scroll() {
 	reset(); scroll2(600, 10, 5);
-	if (!cfg_gestures) {
+	if (!POINTS) {
 		CHECK(count('s') > 10 && count('f') == 0, "line scrolling: %d line events, %d fixed", count('s'), count('f'));
 		int64_t y = 0; for (auto &e : out) if (e.kind == 's') y += e.y;
 		CHECK(y == -(600 / 24), "lines %lld", (long long)y);
@@ -80,35 +84,33 @@ static void test_scroll() {
 		return;
 	}
 	CHECK(count('s') == 0 && count('p') == 0, "line %d pointer %d", count('s'), count('p'));
-	int began = 0, ended = 0; int64_t y = 0, x = 0; size_t first = out.size(), endAt = 0;
+	int64_t y = 0, x = 0;
 	for (size_t i = 0; i < out.size(); i++) { auto &e = out[i]; if (e.kind != 'f') continue;
-		if (e.a & BEGAN) { began++; first = i; } if (e.a & ENDED) { ended++; endAt = i; } y += e.y; x += e.x;
-		CHECK(e.a & 4, "no pixel units on a scroll event"); }
-	CHECK(began == 1 && ended == 1 && first < endAt, "began %d ended %d", began, ended);
+		y += e.y; x += e.x;
+		// 0465: pixel units and nothing else: a gesture phase or momentum flag makes AppKit abort the app (S6i)
+		CHECK(e.a == 4, "scroll event options %#x (must be pixel units only)", e.a); }
 	// 600 panel px = 600 canvas px = 300 points, fingers down => negative y
 	CHECK(y == -300 * 65536 && x == 0, "scrolled %lld/65536 points, x %lld", (long long)(y / 65536), (long long)x);
 	CHECK(T.steer.ms == 16, "momentum timer %d", T.steer.ms);
 	size_t before = out.size(); int n = ticks(5000);
 	CHECK(n > 20 && n < 200, "momentum ticks %d", n);
-	int64_t my = 0; bool start = false, end = false, order = true;
-	for (size_t i = before; i < out.size(); i++) { auto &e = out[i]; if (e.kind != 'f') { order = false; continue; }
-		if (e.a & MSTART) { start = true; if (i != before) order = false; }
-		if (e.a & MEND) { end = true; if (i != out.size() - 1) order = false; CHECK(e.y == 0, "End carries movement"); }
-		if (!(e.a & (MSTART | MCONT | MEND)) || (e.a & (BEGAN | CHANGED | ENDED))) order = false;
+	int64_t my = 0; bool plain = true;
+	for (size_t i = before; i < out.size(); i++) { auto &e = out[i]; if (e.kind != 'f' || e.a != 4) { plain = false; continue; }
 		my += e.y; }
-	CHECK(start && end && order, "momentum start %d end %d order %d", start, end, order);
+	CHECK(plain, "momentum events are not plain pixel scroll events");
 	// 2 points/ms at the lift: the coast must go on in the same direction, between 200 and 1500 points
 	CHECK(my < -200 * 65536 && my > -1500 * 65536, "momentum distance %lld points", (long long)(my / 65536));
 	printf("  scroll: 300 points by hand, then %lld points of momentum in %d ticks\n", (long long)(-my / 65536), n);
 	// slow end: no momentum
 	reset(); scroll2(600, 10, 200);
-	CHECK(has_opt(ENDED) && !has_opt(MSTART) && T.steer.ms == 0, "slow lift: ended %d momentum %d timer %d", has_opt(ENDED), has_opt(MSTART), T.steer.ms);
+	CHECK(T.steer.ms == 0, "slow lift: momentum timer %d", T.steer.ms);
+	{ size_t b2 = out.size(); ticks(1000); CHECK(out.size() == b2, "slow lift: %zu events after the lift", out.size() - b2); }
 	// a finger stops the momentum
 	reset(); scroll2(600, 10, 5); T.steer.ms = 0; ms(16); T.padTick(); ms(16); T.padTick();
 	out.clear(); touch(0, true, 700, 700);
-	CHECK(out.size() == 1 && out[0].kind == 'f' && (out[0].a & MEND), "touch during momentum: %zu events", out.size());
+	CHECK(out.size() == 0, "touch during momentum: %zu events", out.size());
 	T.steer.ms = 0; ms(16); T.padTick();
-	CHECK(count('f') == 1, "momentum went on after the touch");
+	CHECK(count('f') == 0, "momentum went on after the touch");
 	ms(400); touch(0, false, 700, 700); ticks(1000);
 }
 
@@ -136,7 +138,7 @@ static void test_swipe3(int dx, int dy, uint32_t key) {
 	for (int i = 1; i <= 15; i++) { ms(10); for (int f = 0; f < 3; f++) touch(f, true, 400 + 300 * f + dx * i / 15, 1500 + dy * i / 15); }
 	ms(10); for (int f = 2; f >= 0; f--) { touch(f, false, 400 + 300 * f + dx, 1500 + dy); ms(4); }
 	ticks(1000);
-	if (!cfg_gestures) { CHECK(count('k') == 0, "keys without gestures"); return; }
+	if (!SWIPES) { CHECK(count('k') == 0, "keys without the swipes"); return; }
 	std::vector<Ev> k; for (auto &e : out) if (e.kind == 'k') k.push_back(e);
 	CHECK(k.size() == 4 && k[0].a == 0xe0 && k[0].b == 1 && k[1].a == key && k[1].b == 1 && k[2].a == key && k[2].b == 0 &&
 	    k[3].a == 0xe0 && k[3].b == 0, "swipe %d,%d: %zu key events, key 0x%x", dx, dy, k.size(), k.size() > 1 ? k[1].a : 0);
@@ -186,9 +188,11 @@ static void test_kbd_swipe() {
 
 int main(int argc, char **argv) {
 	cfg_gestures = argc > 1 ? atoi(argv[1]) : 1; verbose = argc > 2;
+	// 0465: whatever the mode, no event may carry a gesture phase or a momentum flag
 	test_one_finger(); test_two_finger_tap(); test_scroll();
 	test_swipe3(0, -300, 0x52); test_swipe3(0, 300, 0x51); test_swipe3(-300, 0, 0x4f); test_swipe3(300, 20, 0x50);
 	test_leftover_finger(); test_one_finger(); test_kbd_swipe();
+	if (phase_events) { printf("FAIL: %d scroll events with phase or momentum bits\n", phase_events); fails++; }
 	printf("%s: sweetpad=%d, %d failures\n", fails ? "FAILED" : "ok", cfg_gestures, fails);
 	return fails != 0;
 }

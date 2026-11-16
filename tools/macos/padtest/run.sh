@@ -8,5 +8,4 @@ OUT=${2:-${TMPDIR:-/tmp}/sb-padtest}
 mkdir -p "$OUT"
 python3 "$HERE/extract.py" "$TREE/iokit/Kernel/arm/hid/SweetHID.cpp" "$OUT/pad_cut.inc"
 clang++ -std=c++17 -O1 -g -fsanitize=${SAN:-undefined} -Wall -Wno-unused-function -Wno-unused-variable -I "$TREE/iokit/Kernel/arm" -I "$OUT" "$HERE/padtest.cpp" -o "$OUT/padtest"
-"$OUT/padtest" 1
-"$OUT/padtest" 0
+for mode in 0 1 2 3; do "$OUT/padtest" $mode; done

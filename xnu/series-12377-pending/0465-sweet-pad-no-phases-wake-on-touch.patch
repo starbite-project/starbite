@@ -1,0 +1,297 @@
+0465: no scroll event carries a gesture phase; a touch wakes the sleeping display; a scripted gesture test.
+
+S6i 2026-11-16 (hands-on, sweetpad=1 as 0460 made it): "everything is crashing, even Finder". Finder (twice) and
+System Settings aborted in AppKit's _NSScrollingConcurrentVBLMonitor (_run_monitor_thread -> os_crash) 10-25 s after
+two-finger scrolls. Scroll events with trackpad phases put AppKit into its concurrent-scrolling mode, which waits for
+the display's vertical blank; nothing delivers one here. And for the first 49 s touches "did nothing": macOS had put
+the display to sleep after 10 idle minutes (our driver keeps the panel lit with a5fb_keep_on, so it looked frozen);
+pointer events from this service do not wake it, the first key of the on-screen keyboard did.
+- sweetpad is a bit mask: 1 = three-finger swipes (+ the leftover-finger rule), 2 = two-finger scrolling in points
+  with our own inertia, sent as plain pixel-unit scroll events. No phase, no momentum flags, in any mode.
+- sweet_fb_off_requested (SweetFramebuffer.cpp RequestPowerChange): a touch-down while macOS has the display off taps
+  Shift through the keyboard service (at most once a second).
+- sweetpadtest=N: N s after boot scripted gestures through SweetHIDTouch::touch: two-finger scrolls, three-finger
+  swipes, waits of 20-25 s, twice; a third round 700 s after boot (after the 10-minute display sleep).
+tools/macos/padtest checks every mode and that no event has phase or momentum bits. Kernel seq2j = seq2i + 0465.
+
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -383,6 +383,10 @@
+ 	IOTimerEventSource *fSteer;
+ 	IOTimerEventSource *fTouchTest;
+ 	int fTouchTestStep;
++	/* 0465 sweetpadtest=N: N s after boot a scripted set of trackpad gestures (two-finger scrolls, three-finger
++	 * swipes), so new gesture events meet AppKit on an unattended boot before they meet the user */
++	static void padTestFired(OSObject *owner, IOTimerEventSource *sender);
++	int fPadTestSeg;
+ 	IOLock *fLock;
+ 	int fLogicalW, fLogicalH, fOffX, fOffY, fPanelW, fPanelH;
+ 	bool fDown[SWEET_TOUCH_FINGERS];
+@@ -427,6 +431,7 @@
+ OSDefineMetaClassAndStructors(SweetHIDKeyboard, IOHIDEventService);
+ static SweetHIDKeyboard *gSweetKeyboard;
+ static bool sweet_touch_is_mouse(void);
++extern "C" volatile int sweet_fb_off_requested;         /* 0465, SweetFramebuffer.cpp: macOS asked for the display off */
+ 
+ bool
+ SweetHIDButtons::start(IOService *provider)
+@@ -957,6 +962,14 @@
+ 		if (fTouchTest && _hidWorkLoop->addEventSource(fTouchTest) == kIOReturnSuccess) {
+ 			fTouchTest->setTimeoutMS((uint32_t)testSecs * 1000);
+ 			IOLog("SWEET HID: touch test drag at %d s, then every 60 s\n", testSecs);
++		}
++	}
++	int padSecs = 0;
++	if (fMouse && fTouchTest == NULL && PE_parse_boot_argn("sweetpadtest", &padSecs, sizeof(padSecs)) && padSecs > 0) {
++		fTouchTest = IOTimerEventSource::timerEventSource(this, &SweetHIDTouch::padTestFired);
++		if (fTouchTest && _hidWorkLoop->addEventSource(fTouchTest) == kIOReturnSuccess) {
++			fTouchTest->setTimeoutMS((uint32_t)padSecs * 1000);
++			IOLog("SWEET HID: pad gesture test at %d s\n", padSecs);
+ 		}
+ 	}
+ 	if (fMouse) {
+@@ -1031,6 +1044,56 @@
+ }
+ 
+ /*
++ * 0465: the scripted gestures of sweetpadtest. Fingers start at y 1700 (above the on-screen keyboard and the
++ * summon zone): a two-finger scroll up, one down, 20 s (S6i: AppKit's abort came 10-25 s after a scroll), two
++ * three-finger swipes up (Mission Control in and out), a scroll up, 25 s, a scroll down; then once more after 30 s,
++ * and a third time 700 s after boot.
++ */
++void
++SweetHIDTouch::padTestFired(OSObject *owner, IOTimerEventSource *sender)
++{
++	static const struct { int fingers, moves, dy, wait_ms; } segs[] = {
++		{ 2, 30, -25, 3000 }, { 2, 30, 25, 20000 }, { 3, 12, -30, 4000 }, { 3, 12, -30, 5000 },
++		{ 2, 30, -25, 25000 }, { 2, 30, 25, 30000 },
++	};
++	const int nsegs = (int)(sizeof(segs) / sizeof(segs[0]));
++	SweetHIDTouch *self = (SweetHIDTouch *)owner;
++	int seg = self->fPadTestSeg % nsegs, i = self->fTouchTestStep++;
++	int n = segs[seg].moves;
++	if (i == 0) {
++		IOLog("SWEET HID: pad test %d: %s\n", self->fPadTestSeg, segs[seg].fingers == 2 ? "two-finger scroll" : "three-finger swipe");
++	}
++	if (i <= n) {
++		for (int f = 0; f < segs[seg].fingers; f++) {
++			self->touch(f, true, 420 + 300 * f, 1700 + segs[seg].dy * i);
++		}
++		sender->setTimeoutMS(16);
++		return;
++	}
++	for (int f = segs[seg].fingers - 1; f >= 0; f--) {
++		self->touch(f, false, 420 + 300 * f, 1700 + segs[seg].dy * n);
++	}
++	self->fTouchTestStep = 0;
++	self->fPadTestSeg++;
++	if (self->fPadTestSeg == 2 * nsegs) {
++		/* a third round 700 s after boot: macOS's 10-minute display sleep has come by then, so its first touch
++		 * must wake the display (0465) and the first GPU jobs after the idle time are seen (S6i: one hung 5.7 s) */
++		uint64_t up = 0;
++		absolutetime_to_nanoseconds(mach_absolute_time(), &up);
++		if (up / NSEC_PER_MSEC < 700000ULL) {
++			sender->setTimeoutMS((uint32_t)(700000ULL - up / NSEC_PER_MSEC));
++			IOLog("SWEET HID: pad test: a third round at 700 s\n");
++		} else {
++			IOLog("SWEET HID: pad test done\n");
++		}
++	} else if (self->fPadTestSeg < 3 * nsegs) {
++		sender->setTimeoutMS((uint32_t)segs[seg].wait_ms);
++	} else {
++		IOLog("SWEET HID: pad test done\n");
++	}
++}
++
++/*
+  * Direct touch (0397, replaces 0394's trackpad; macOS only moves the pointer for relative events):
+  *   one finger: the pointer goes where the finger is and follows it; a short tap (< 300 ms, < 40 px)
+  *     clicks there; touch, hold still 350 ms, then move = drag (button 1 held until the finger lifts)
+@@ -1313,7 +1376,14 @@
+ } pad = { 0, -1 };
+ 
+ /*
+- * 0460: the trackpad's gestures as a Mac trackpad has them (boot-arg sweetpad=1; 0, the default for now, keeps
++ * 0465: sweetpad is a bit mask now. 1 = the three-finger swipes (and the leftover finger rule); 2 = two-finger
++ * scrolling in points, WITHOUT gesture phases or momentum flags, the inertia sent as plain scroll events.
++ * S6i 2026-11-16 (sweetpad=1 as 0460 made it): Finder (twice) and System Settings aborted in AppKit's
++ * _NSScrollingConcurrentVBLMonitor 10-25 s after a two-finger scroll: scroll events with trackpad phases put
++ * AppKit into its concurrent-scrolling mode, which waits for the display's vertical blank; nothing delivers one
++ * here and its monitor thread calls os_crash. So no event from this driver carries a phase any more.
++ *
++ * 0460: the trackpad's gestures as a Mac trackpad has them (boot-arg sweetpad; 0, the default for now, keeps
+  * 0445's line scrolling):
+  *   two fingers: scrolling in points, 1:1 with the fingers, as scroll events with pixel units and gesture
+  *     phases (Began / Changed / Ended) and, after a quick lift, momentum events that die away (the timer);
+@@ -1353,10 +1423,10 @@
+ #define SWEET_PAD_MOM_MIN       13107   /* 0.2 points/ms (16.16): slower lifts leave no momentum */
+ #define SWEET_PAD_MOM_STOP      1966    /* 0.03 points/ms: momentum ends */
+ #define SWEET_PAD_OPT_PIXELS    kIOHIDEventOptionIsPixelUnits
+-#define SWEET_PAD_PHASE(p)      ((IOOptionBits)(p) << kIOHIDEventEventOptionPhaseShift)
+-#define SWEET_PAD_MOMENTUM(m)   ((IOOptionBits)(m) << kIOHIDEventScrollMomentumShift)
++#define SWEET_PAD_SWIPES         1       /* sweetpad bit: three-finger swipes */
++#define SWEET_PAD_POINTS        2       /* sweetpad bit: two-finger scrolling in points (no phases: 0465) */
+ 
+-/* the scroll gesture ends (lock held): the Ended event, and momentum if the fingers left fast */
++/* the scroll gesture ends (lock held): momentum if the fingers left fast. No event (0465: no phases). */
+ static IOHIDEvent *
+ sweet_pad_scroll_end(uint64_t now)
+ {
+@@ -1370,7 +1440,7 @@
+ 		pad.momX = pad.velX;
+ 		pad.momY = pad.velY;
+ 	}
+-	return IOHIDEvent::scrollEventWithFixed(now, 0, 0, 0, SWEET_PAD_OPT_PIXELS | SWEET_PAD_PHASE(kIOHIDEventPhaseEnded));
++	return NULL;
+ }
+ 
+ static int
+@@ -1394,7 +1464,8 @@
+ 	int cw, ch;
+ 	sweet_canvas(&cw, &ch);
+ 	int strip = fLogicalW > 0 ? fLogicalW : fPanelW;
+-	const bool gest = sweet_pad_gestures() != 0;
++	const int gestures = sweet_pad_gestures();
++	const bool gest = gestures != 0, swipes = (gestures & SWEET_PAD_SWIPES) != 0, points = (gestures & SWEET_PAD_POINTS) != 0;
+ 	UInt32 swipeKey = 0;            /* 0460: the arrow key of a three-finger swipe, sent with control */
+ 	bool tick = false;
+ 
+@@ -1409,10 +1480,6 @@
+ 	int n = sweet_popcount(pad.downMask);
+ 	if (down && !was && pad.momentum != 0) {
+ 		/* 0460: a finger stops the momentum */
+-		if (pad.momentum == 2) {
+-			events[ne++] = IOHIDEvent::scrollEventWithFixed(now, 0, 0, 0, SWEET_PAD_OPT_PIXELS |
+-			    SWEET_PAD_MOMENTUM(kIOHIDEventScrollMomentumEnd));
+-		}
+ 		pad.momentum = 0;
+ 	}
+ 	if (!down && was && pad.scrolling && n < 2) {
+@@ -1442,7 +1509,7 @@
+ 			pad.accX = pad.accY = 0;
+ 			pad.scAccX = pad.scAccY = 0;
+ 			pad.lastMoveAt = now;
+-			if (gest && n >= 3) {
++			if (swipes && n >= 3) {
+ 				/* 0460: a third finger: no longer a scroll; its swipe is counted from here */
+ 				if (pad.scrolling) {
+ 					events[ne++] = sweet_pad_scroll_end(now);
+@@ -1462,7 +1529,7 @@
+ 		pad.lastY = y;
+ 		int speed = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+ 		pad.travel += speed;
+-		if (n >= 2 && gest && pad.maxFingers >= 3) {
++		if (n >= 2 && swipes && pad.maxFingers >= 3) {
+ 			/* 0460: three fingers: one swipe */
+ 			pad.g3x += dx;
+ 			pad.g3y += dy;
+@@ -1477,16 +1544,16 @@
+ 				    "three-finger swipe down = app windows") : (pad.g3x < 0 ? "three-finger swipe left = next Space" :
+ 				    "three-finger swipe right = previous Space");
+ 			}
+-		} else if (n >= 2 && gest) {
+-			/* 0460: two fingers: scroll in points, with phases */
++		} else if (n >= 2 && points) {
++			/* 0460: two fingers: scroll in points (0465: plain events, no phases) */
+ 			pad.scAccX += dx;
+ 			pad.scAccY += dy;
+ 			int ax = pad.scAccX < 0 ? -pad.scAccX : pad.scAccX, ay = pad.scAccY < 0 ? -pad.scAccY : pad.scAccY;
+-			IOHIDEventPhaseBits phase = kIOHIDEventPhaseChanged;
++			bool began = false;
+ 			if (!pad.scrolling && ax + ay >= SWEET_PAD_SCROLL_START) {
+ 				pad.scrolling = true;
+ 				pad.velX = pad.velY = 0;
+-				phase = kIOHIDEventPhaseBegan;
++				began = true;
+ 				what = "scroll start";
+ 			}
+ 			if (pad.scrolling && (pad.scAccX != 0 || pad.scAccY != 0)) {
+@@ -1496,7 +1563,7 @@
+ 				absolutetime_to_nanoseconds(now - pad.lastMoveAt, &ns);
+ 				int64_t ms = (int64_t)(ns / NSEC_PER_MSEC);
+ 				ms = ms < 1 ? 1 : (ms > 100 ? 100 : ms);
+-				if (phase == kIOHIDEventPhaseBegan) {
++				if (began) {
+ 					pad.velX = fx / ms;
+ 					pad.velY = fy / ms;
+ 				} else {
+@@ -1505,8 +1572,7 @@
+ 				}
+ 				pad.lastMoveAt = now;
+ 				pad.scAccX = pad.scAccY = 0;
+-				events[ne++] = IOHIDEvent::scrollEventWithFixed(now, (IOFixed)fx, (IOFixed)fy, 0,
+-				    SWEET_PAD_OPT_PIXELS | SWEET_PAD_PHASE(phase));
++				events[ne++] = IOHIDEvent::scrollEventWithFixed(now, (IOFixed)fx, (IOFixed)fy, 0, SWEET_PAD_OPT_PIXELS);
+ 			}
+ 		} else if (n >= 2) {
+ 			pad.accX += dx;
+@@ -1553,7 +1619,7 @@
+ 			pad.buttons = 0;
+ 			pad.dragging = false;
+ 			what = "drag end";
+-		} else if (gest && pad.maxFingers >= 3) {
++		} else if (swipes && pad.maxFingers >= 3) {
+ 			pad.pendingClicks = 0;          /* 0460: three fingers never click */
+ 			if (!what) {
+ 				what = pad.swipe3 ? "swipe end" : "three fingers up";
+@@ -1631,15 +1697,10 @@
+ 	if (pad.momentum != 0) {
+ 		int64_t ax = pad.momX < 0 ? -pad.momX : pad.momX, ay = pad.momY < 0 ? -pad.momY : pad.momY;
+ 		if (ax + ay < SWEET_PAD_MOM_STOP) {
+-			if (pad.momentum == 2) {
+-				mom = IOHIDEvent::scrollEventWithFixed(now, 0, 0, 0, SWEET_PAD_OPT_PIXELS |
+-				    SWEET_PAD_MOMENTUM(kIOHIDEventScrollMomentumEnd));
+-			}
+ 			pad.momentum = 0;
+ 		} else {
+ 			mom = IOHIDEvent::scrollEventWithFixed(now, (IOFixed)(pad.momX * 16), (IOFixed)(pad.momY * 16), 0,
+-			    SWEET_PAD_OPT_PIXELS | SWEET_PAD_MOMENTUM(pad.momentum == 1 ? kIOHIDEventScrollMomentumStart :
+-			    kIOHIDEventScrollMomentumContinue));
++			    SWEET_PAD_OPT_PIXELS);           /* 0465: a plain scroll event, no momentum flags */
+ 			pad.momentum = 2;
+ 			pad.momX = pad.momX * 61 / 64;
+ 			pad.momY = pad.momY * 61 / 64;
+@@ -1795,6 +1856,25 @@
+ 	}
+ 	x = x < 0 ? 0 : (x >= fPanelW ? fPanelW - 1 : x);
+ 	y = y < 0 ? 0 : (y >= fPanelH ? fPanelH - 1 : y);
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	if (fMouse && down && sweet_fb_off_requested && gSweetKeyboard != NULL) {
++		/*
++		 * 0465: macOS has put the display to sleep (10 idle minutes) and a finger arrives. S6i: for 49 s touches
++		 * did nothing ("touch no longer moved the pointer") until a key of the on-screen keyboard woke the
++		 * display: pointer events from this service do not count as a wake, key events do. So the first touch
++		 * taps Shift (at most once a second); the display-on request then clears the flag.
++		 */
++		static uint64_t lastWake;
++		uint64_t ns = 0;
++		absolutetime_to_nanoseconds(now - lastWake, &ns);
++		if (lastWake == 0 || ns > NSEC_PER_SEC) {
++			lastWake = now;
++			IOLog("SWEET HID: a touch while the display sleeps: Shift tapped to wake it\n");
++			gSweetKeyboard->key(0xe1, true);
++			gSweetKeyboard->key(0xe1, false);
++		}
++	}
++#endif
+ 	if (fMouse) {
+ 		int rx = 0, ry = 0;
+ 		int k = sweet_kbd_touch(finger, down, x, y, &rx, &ry);
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -60,6 +60,7 @@
+ #include "sweet_kbd.h"
+ extern "C" {
+ struct sweet_kbd_shared sweet_kbd;      /* 0456: the on-screen keyboard's state (SweetHID.cpp writes, this file draws) */
++volatile int sweet_fb_off_requested;    /* 0465: the last RequestPowerChange was "off" (SweetHID.cpp wakes on touch) */
+ }
+ 
+ #if defined(ARM64_BOARD_CONFIG_HEROLTE)
+@@ -2182,6 +2183,7 @@
+ 	case kSweetFBRequestPowerChange:
+ 		if (args->scalarInputCount >= 1) {
+ 			bool off = args->scalarInput[0] == 0;
++			sweet_fb_off_requested = off;   /* 0465: also when a5fb_keep_on ignores it: macOS stops drawing either way */
+ #if defined(ARM64_BOARD_CONFIG_A5XELTE)
+ 			int keep_on = 0;
+ 			if (off && PE_parse_boot_argn("a5fb_keep_on", &keep_on, sizeof(keep_on)) && keep_on) {
