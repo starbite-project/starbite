@@ -3586,6 +3586,26 @@ switches are from reading; not run.)
   The single 0x51 is not explained by that fix and has to be looked for in T90's records.
 - So `nirshaders` must stay off for DWM on 63cb8404 (it is off by default; this run set it on purpose).
 
+### 6.120 Chain results, part 7: T85, 32-bit programs draw on the Mali for the first time
+
+(2026-11-16 19:38; `build/win/results-t85`: the x86 sbumd cc015f8e in SysWOW64 with `UserModeDriverNameWow`, the 0167 driver
+set for 64-bit; measured.)
+
+- **Windows hands 32-bit programs our driver.** dxgkrnl.sys knows the value name (`X86 dxgkrnl knows
+  UserModeDriverNameWow`; it also has `...Wow2`, `...X64`, `...Wsa32/64`, `...WSL`). The 32-bit test program:
+  `device: feature level 0xa000 on "Starbite Display (Galaxy S9 DECON)"; sbumd.dll LOADED`, `PASS clear`,
+  `PASS triangle`, exit 0. The kernel driver's own record of a 32-bit bind is there (`UmdNote_48` 1, the pid in
+  `UmdNote_49`).
+- **The first 12 d3d10core tests as 32-bit programs: 12 pass**, none on another adapter. DWM alive, KMD counters 0.
+- So the audit's claim holds on the phone: the kernel interface is the same for 32-bit callers, no kernel change.
+- **Not yet known:** the whole suite as 32-bit; a 32-bit program presenting to a window while DWM runs the user's
+  T61 driver (this run had 0167 on the 64-bit side); real 32-bit apps; memory behaviour in a 2 GB address space.
+  **T85b** (`sbwddm-t85b`: T61's driver set + the x86 driver + all 111 d3d10core tests as 32-bit,
+  `sb-x86-full.bat`) covers the first two.
+- `UserModeDriverNameX64` exists as a value name: x64 processes could be given a driver file of their own, which
+  would be a simpler way than one ARM64X file for both. Not used.
+- The chain cleared the value again after the test, as planned.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
