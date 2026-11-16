@@ -14,7 +14,7 @@ set D=C:\starbite\auto\gpu
 set L=%D%\gputest.log
 set U=C:\ProgramData\Starbite\umdlog
 set S=%SystemRoot%\System32
-set K=HKLM\SYSTEM\CurrentControlSet\Services\sbwddm\State
+set K=HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\STRB0072\0\Device Parameters\sbwddm
 cd /d %D%
 echo ROWS logon reached %date% %time% >> %L%
 ping -n 21 127.0.0.1 > nul
@@ -91,8 +91,8 @@ if "!ROW!"=="NEW-GPU" if !NG! gtr 0 if !ST! equ 0 if !TST! equ 0 set V=PASS
 if "!ROW!"=="standard" if !ST! gtr 0 if !NG! equ 0 if !TNG! equ 0 set V=PASS
 echo ROWS VERDICT !V!: row !ROW!, selector lines ng !NG! / std !ST!, loaded now ng !TNG! / std !TST! >> %L%
 
-for %%V in (Live_JobsTimedOut Live_GpuResets Live_FaultCount Live_HangCount) do for /f "tokens=3" %%v in ('reg query %K% /v %%V 2^>nul ^| find "REG_DWORD"') do (set /a X=%%v & echo ROWS %%V !X! >> %L%)
-reg query %K% > %U%\sbwddm-state.txt 2>&1
+for %%V in (Live_JobsTimedOut Live_GpuResets Live_JobsFailed Live_TdrEngineResets) do for /f "tokens=3" %%v in ('reg query "%K%" /v %%V 2^>nul ^| find "REG_DWORD"') do (set /a X=%%v & echo ROWS %%V !X! >> %L%)
+reg query "%K%" > %U%\sbwddm-state.txt 2>&1
 reg query HKLM\SYSTEM\CurrentControlSet\Services\sbwdog\State > %U%\sbwdog-state.txt 2>&1
 wevtutil qe Application /q:"*[System[(EventID=1000)]]" /rd:true /c:16 /f:text > %U%\rows-app-events.txt 2>&1
 echo ROWS end %date% %time% >> %L%

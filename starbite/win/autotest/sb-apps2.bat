@@ -3,7 +3,7 @@ rem sb-apps2.bat (Track K T80, docs/WIN11-GPU.md 6.104), staged as gputest\sb-us
 rem compositor was blocked on the GPU from the moment Edge started (404 GPU job timeouts in that boot, every one a
 rem dwm.exe vertex job that ran to the 752 ms limit). Which app sets it off, and does the user's driver do the same?
 rem After every step the KMD's counters are read from the registry (Live_JobsTimedOut, Live_GpuResets,
-rem Live_FaultCount, Live_HangCount; test cycles flush them every second):
+rem Live_JobsFailed, Live_TdrEngineResets; test cycles flush them every second):
 rem   0  the Edge processes Windows started at logon are closed; counters
 rem   1  Settings, Calculator, Notepad, Paint, a File Explorer window, Task Manager: 20 s each
 rem   2  sbsmooth "before" (the desktop's pace)
@@ -15,7 +15,7 @@ setlocal EnableDelayedExpansion
 set D=C:\starbite\auto\gpu
 set L=%D%\gputest.log
 set U=C:\ProgramData\Starbite\umdlog
-set K=HKLM\SYSTEM\CurrentControlSet\Services\sbwddm\State
+set K=HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\STRB0072\0\Device Parameters\sbwddm
 set PAGE=file:///C:/starbite/auto/gpu/sb-web.html
 cd /d %D%
 echo APPS2 start %date% %time% >> %L%
@@ -36,7 +36,7 @@ call :app edge-nosandbox msedge.exe "msedge.exe --no-first-run --disable-gpu-san
 call :app edge msedge.exe "msedge.exe --no-first-run --new-window %PAGE%"
 if exist %D%\sbsmooth.exe %D%\sbsmooth.exe after %D%\sbsmooth.log >> %L% 2>&1
 call :stat smooth-after
-reg query %K% > %U%\sbwddm-state.txt 2>&1
+reg query "%K%" > %U%\sbwddm-state.txt 2>&1
 wevtutil qe Application /q:"*[System[(EventID=1000)]]" /rd:true /c:30 /f:text > %U%\apps-app-events.txt 2>&1
 tasklist /v /fo csv > %U%\tasks-apps-end.csv 2>&1
 tasklist /svc /fo csv > %U%\tasks-apps-svc.csv 2>&1
@@ -47,13 +47,13 @@ exit /b 0
 
 :stat
 set T=?& set R=?& set F=?& set H=?
-for /f "tokens=3" %%v in ('reg query %K% /v Live_JobsTimedOut 2^>nul ^| find "REG_DWORD"') do set /a T=%%v
-for /f "tokens=3" %%v in ('reg query %K% /v Live_GpuResets 2^>nul ^| find "REG_DWORD"') do set /a R=%%v
-for /f "tokens=3" %%v in ('reg query %K% /v Live_FaultCount 2^>nul ^| find "REG_DWORD"') do set /a F=%%v
-for /f "tokens=3" %%v in ('reg query %K% /v Live_HangCount 2^>nul ^| find "REG_DWORD"') do set /a H=%%v
+for /f "tokens=3" %%v in ('reg query "%K%" /v Live_JobsTimedOut 2^>nul ^| find "REG_DWORD"') do set /a T=%%v
+for /f "tokens=3" %%v in ('reg query "%K%" /v Live_GpuResets 2^>nul ^| find "REG_DWORD"') do set /a R=%%v
+for /f "tokens=3" %%v in ('reg query "%K%" /v Live_JobsFailed 2^>nul ^| find "REG_DWORD"') do set /a F=%%v
+for /f "tokens=3" %%v in ('reg query "%K%" /v Live_TdrEngineResets 2^>nul ^| find "REG_DWORD"') do set /a H=%%v
 set DW=none
 for /f "tokens=2" %%p in ('tasklist /fi "imagename eq dwm.exe" /nh ^| find /i "dwm.exe"') do set DW=%%p
-echo APPS2 stat after %1 at %time%: job timeouts !T!, GPU resets !R!, faults !F!, hangs !H!, dwm pid !DW! >> %L%
+echo APPS2 stat after %1 at %time%: job timeouts !T!, GPU resets !R!, failed jobs !F!, TDR engine resets !H!, dwm pid !DW! >> %L%
 exit /b 0
 
 :app

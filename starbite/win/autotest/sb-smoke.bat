@@ -8,7 +8,7 @@ setlocal EnableDelayedExpansion
 set D=C:\starbite\auto\gpu
 set L=%D%\gputest.log
 set U=C:\ProgramData\Starbite\umdlog
-set K=HKLM\SYSTEM\CurrentControlSet\Services\sbwddm\State
+set K=HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\STRB0072\0\Device Parameters\sbwddm
 cd /d %D%
 echo SMOKE logon reached %date% %time% >> %L%
 ping -n 21 127.0.0.1 > nul
@@ -26,8 +26,8 @@ if exist %D%\sbcomp.exe for %%M in (hwndblt hwnd) do (
 if exist %D%\d3d10core_test.exe if exist %D%\sbwt.exe %D%\sbwt.exe %D%\d3d10core_test.exe d3d10core %U%\sbwt-d3d10core-smoke.log 60 0 12 >> %L% 2>&1
 call :dwmpid DWM1
 if "!DWM0!"=="!DWM1!" (echo SMOKE DWM SURVIVED, pid !DWM1! >> %L%) else (echo SMOKE DWM RESTARTED, pid !DWM0! then !DWM1! >> %L%)
-for %%V in (Live_JobsTimedOut Live_GpuResets Live_FaultCount Live_HangCount) do for /f "tokens=3" %%v in ('reg query %K% /v %%V 2^>nul ^| find "REG_DWORD"') do (set /a X=%%v & echo SMOKE %%V !X! >> %L%)
-reg query %K% > %U%\sbwddm-state.txt 2>&1
+for %%V in (Live_JobsTimedOut Live_GpuResets Live_JobsFailed Live_TdrEngineResets) do for /f "tokens=3" %%v in ('reg query "%K%" /v %%V 2^>nul ^| find "REG_DWORD"') do (set /a X=%%v & echo SMOKE %%V !X! >> %L%)
+reg query "%K%" > %U%\sbwddm-state.txt 2>&1
 wevtutil qe Application /q:"*[System[(EventID=1000)]]" /rd:true /c:16 /f:text > %U%\smoke-app-events.txt 2>&1
 echo SMOKE end %date% %time% >> %L%
 ping -n 4 127.0.0.1 > nul
