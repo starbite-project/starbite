@@ -267,6 +267,20 @@ int sh_usb_start(void);                   /* USB power out: one burst after the 
 void sh_usb_stop(void);
 void sh_usb(sh_usb_t *u);                 /* ~2 Hz while ON or COOL only */
 const char *sh_usb_guide(int i);          /* the guidance's line i (NULL past the last) */
+/* 9j: Survival Heat (the kernel's heater.c, its own limits and confirmations: the first use, Keep warm's, Survival's
+ * three holds through sh_confirm). States = sbapp.h HEAT_ST_*, levels = HEAT_* (no Extreme / Manual / trip-off in Next) */
+enum { SH_HEAT_OFF = 0, SH_HEAT_RUNNING, SH_HEAT_HOLDING, SH_HEAT_PAUSED, SH_HEAT_STOPPED, SH_HEAT_REFUSED, SH_HEAT_CONFIRM };
+enum { SH_HEAT_LOW = 1, SH_HEAT_MEDIUM = 2, SH_HEAT_HIGH = 3, SH_HEAT_KEEPWARM = 6, SH_HEAT_SURVIVAL = 7 };
+typedef struct {
+    int state, level, secs_left, secs_run;    /* secs_left 0: until stopped */
+    int bat_c10, soc_c10, skin_c10;           /* -1000 unknown */
+    int pct, ma;                              /* the battery while it heats (ma: - discharging) */
+    int target_c10, surv_bat_c10;             /* Keep warm's target; Survival's battery limit */
+    char why[64];                             /* a stop's or a refusal's words */
+} sh_heat_t;
+int sh_heat_start(int level, int minutes);    /* < 0 refused (why in sh_heat); 0 asked (a confirmation may show) */
+void sh_heat_stop(void);
+void sh_heat(sh_heat_t *h);
 #define SH_NOLOC 0x7fffffff
 int sh_sun(int *rise, int *set);          /* local minutes: 0 both, 1 the sun stays up, 2 stays down, -2 no location, -3 no clock */
 void sh_loc(int *lat_x100, int *lon_x100);   /* 0.01 degrees, N / E positive; SH_NOLOC unset */

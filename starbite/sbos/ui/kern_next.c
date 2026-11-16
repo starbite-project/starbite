@@ -3498,6 +3498,39 @@ void sh_usb_console(int on)
 #endif
 }
 int sh_usb_console_on(void) { return sh_pref_int("dev.usb", 0) == 1; }
+/* 9j: Survival Heat (kern/heater.c): its limits, refusals and confirmations are the kernel's; a dry run in the self test */
+int sh_heat_start(int level, int minutes)
+{
+    if (level != SH_HEAT_LOW && level != SH_HEAT_MEDIUM && level != SH_HEAT_HIGH && level != SH_HEAT_KEEPWARM &&
+        level != SH_HEAT_SURVIVAL)
+        return -1;                                   /* (Extreme, Manual and trip-off stay classic-only) */
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: heat: would start (a dry run: the self test)");
+    (void)minutes;
+    return -1;
+#else
+    if (sbos_selftest_enabled) return -1;
+    return heater_request(level, minutes) < 0 ? -1 : 0;
+#endif
+}
+void sh_heat_stop(void) { if (heater_running_ui()) (void)heater_request(0, 0); }
+void sh_heat(sh_heat_t *o)
+{
+    struct sbos_heat h;
+    heater_status(&h);
+    o->state = h.state;
+    o->level = h.level;
+    o->secs_left = h.secs_left;
+    o->secs_run = h.secs_run;
+    o->bat_c10 = h.bat_c10;
+    o->soc_c10 = h.soc_c10;
+    o->skin_c10 = h.skin_c10;
+    o->pct = h.pct;
+    o->ma = h.ma;
+    o->target_c10 = h.target_c10;
+    o->surv_bat_c10 = h.surv_bat_c10;
+    sb_strcpy(o->why, sizeof(o->why), h.why);
+}
 static void drv_after_bake(void)
 {
 #ifndef SBOS_SELFTEST_NEXT

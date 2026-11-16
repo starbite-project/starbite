@@ -1078,7 +1078,7 @@ static int ec_next = 8;                 /* survival-next: cards 4..7 drawn so fa
 static int ec_wait;                     /* B6: Emergency's first cards or Exit not drawn yet (hidden till then) */
 typedef struct { const char *icon, *t, *s, *act; } ecard_t;   /* act: the app it opens (none: a toast) */
 static const ecard_t EC[8] = {
-    { "e46-heat", "Survival Heat", "Warms your hands \xc2\xb7 stops at a 65 \xc2\xb0" "C battery", "Survival Heat" },
+    { "e46-heat", "Survival Heat", "Warms hands or a cold battery \xc2\xb7 stops by itself", "heat" },   /* 9j: in Next */
     { "e46-power", "Last 2 %", "Everything off but the clock, the torch and SOS", "power" },
     { "e46-sos", "Emergency SOS", "Morse SOS on the torch, the motor and the screen", "sos" },
     { "e46-medical", "Medical Card", "Shown here without unlocking", "medical" },
@@ -3216,7 +3216,7 @@ static const appdef APPS[] = {
     { "browser", "Browser", 0x2f7bf6, 1, { { "", 1, { { "The browser needs the internet", "" } } } } },
     { "medical", "Medical Card", 0xd62f3f, 1, { { "", 1, { { "", "" } } } } },     /* survival-next */
     { "sos", "SOS", 0xb3150c, 1, { { "", 1, { { "", "" } } } } },
-    { "heat", "Survival Heat", 0x1d2440, 1, { { "", 1, { { "Survival Heat runs in Starbite OS", "" } } } } },
+    { "heat", "Survival Heat", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },    /* 9j: shell_survival.inc */
     { "power", "Last 2 %", 0xe09f1f, 1, { { "", 1, { { "", "" } } } } },      /* survival-next: shell_survival.inc */
     { "usb", "USB Power", 0xe0461f, 1, { { "", 1, { { "", "" } } } } },
     { "sun", "Sun", 0xff8a00, 1, { { "", 1, { { "", "" } } } } },
@@ -4233,7 +4233,6 @@ static const infopg INFO[] = {
     { "files", "No Files", "Files isn't in this version yet." },
     { "terminal", "Not Here Yet", "The terminal and Linux apps run in Starbite OS." },
     { "browser", "No Internet", "The browser needs the internet. This phone isn't online yet." },
-    { "heat", "Not Here Yet", "Survival Heat runs in Starbite OS." },
 };
 static const infopg *info_of(const char *k)
 {
