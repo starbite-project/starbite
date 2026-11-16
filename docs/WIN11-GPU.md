@@ -3224,6 +3224,35 @@ they are (T61's sbumd 6d759c44).
   with shots, DWM survived or not, a Geometry Dash run with kit 0169, the selector log and a verdict
   (new row: every process `-> sbumd-ng.dll`; standard row: every process `-> sbumd.dll`).
 
+### 6.109 Late touches in Windows: what is measured first (T84), and the fix candidate in the GL kit (0170)
+
+(2026-11-16 15:22; staged, **nothing run yet**.) The user (11-16): Geometry Dash decently smooth, but touches arrive a lot
+late. Mouse-to-frame was ~15 ms in T72, so the suspect is the touch path.
+
+- **What is known.** The user's install is touch-6 (s6touchdiag td3-25ms-5x + sbhsi2c-3, 6.88c): a touch read
+  takes ~0.45 ms, on the M3 row 1 transfer in 7 needs the 2 ms poll, DiagI2cError 0. The driver reads every event
+  of an interrupt and completes the HID report in the same pass. "Press and hold for right-click" is off
+  (HKCU Wisp\Touch TouchMode_hold 0, touch.log 11-14). None of that explains "a lot late".
+- **Hypothesis (not measured):** Geometry Dash reads only the mouse (GLFW's WM_LBUTTONDOWN/UP). For such a window
+  Windows promotes a touch to a click, and it may send the button-down only once it knows what the touch is, i.e.
+  when the finger lifts or moves. Then every tap is late by the time the finger stays down and a hold does nothing.
+- **T84** (`build/win/stage/sbwddm-t84`, `tools/win/mesa/tests/sbtouchlat.cpp`, `sb-touchlat.bat`): injected touches
+  (InjectTouchInput; taps 60 ms, holds 400 / 1500 ms, drags) into four kinds of window (plain, press-and-hold
+  disabled by window property, gestures blocked, RegisterTouchWindow); logged per touch: when WM_POINTERDOWN, the
+  promoted WM_LBUTTONDOWN, WM_LBUTTONUP, a right click, WM_GESTURE and WM_TOUCH arrive after the touch-down, and
+  whether the click came "at once", "during the hold" or "at or after the release". Injection enters at win32k, so
+  this measures Windows' part; the digitizer chain's part is in the touch driver's own counters of the user's
+  session (user-pull before any test boot).
+- **GL kit 0170** (src-tc 3d8ee0f, `sb-patches/0170`, `build/win/gd-kit-ec-0170`; switch: flag file `gltouch` or
+  `SB_GL_TOUCH=1`, off by default): the kit runs inside the game and sees its window when the GL framebuffer is
+  made. With the switch on it wraps the window procedure: a touch pointer going down becomes WM_MOUSEMOVE +
+  WM_LBUTTONDOWN at that moment, moves become WM_MOUSEMOVE, the release WM_LBUTTONUP; the pointer message is
+  answered so Windows promotes nothing, and mouse messages Windows still derives from touch are dropped. A second
+  finger landing while one is down is a new press (up, then down), for two thumbs alternating; the button goes
+  up when the last finger lifts. Only attached from the window's own thread; a real mouse passes through.
+- **T84 part 2** (same boot): `sbtouchlat-x64.exe ... gl`, an x64 program with a GL window on kit 0170 (files in the
+  test folder only), the switch off, then on. On should show the click with the touch-down.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
