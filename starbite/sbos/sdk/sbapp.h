@@ -305,7 +305,38 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
                              else 0 */,
        SET_SURV_FIRE_INFO = 53 /* read: the chip's limit events (10 bits) | its own switch-offs << 10 (6 bits) | the
                                   minutes left << 16 (0x7fff unknown) */,
-       SET_SURV_USB_ILIM = 54 /* read: the chip's OTG current limit as read back at the start, mA (-1 unknown) */ };
+       SET_SURV_USB_ILIM = 54 /* read: the chip's OTG current limit as read back at the start, mA (-1 unknown) */,
+       /* 1.2-alpha30: the fire starter (kern/survival.h surv_fs_start; docs/USB-FIRE-STARTER.md) */
+       SET_SURV_FS = 55 /* write after the app's arming hold, while the finger is STILL down: the pulse (0 0.5 s,
+                           1 1 s, 2 2 s) | repeat << 4 | the limit (1 0.9 A, 2 1.2 A, 3 1.5 A) << 8 | 1 << 12
+                           | S9 #2's override << 16 (0 off, 1 fast re-arm, 2 + VBYPSET; pulses <= 1 s) | the
+                           VBYPSET code << 20 (7 bits, override 2 only); the
+                           pulses run only while the finger stays on the screen. 0 stops. Reads as SET_SURV_USB while
+                           a fire-starter hold runs (or cools down), else 0 */,
+       SET_SURV_FS_INFO = 56 /* read: pulses done (4 bits) | the most (4 bits) << 4 | output on now << 8 | the
+                                SURV_FS_WHY_* of the last end << 9 (5 bits) | the time left of this pulse or rest,
+                                0.1 s, << 14 (8 bits) | the battery 0.1 C << 22 (10 bits, 1023 unknown) */,
+       SET_SURV_FS_LAST = 57 /* read: the last pulse: its mean mA at the port (12 bits, 0xfff unknown) | its peak mA
+                                << 12 (12 bits) | its lowest VBUS code << 24 (4 bits: 0 below 3.5 V, 2 about 5 V,
+                                0xf none) */,
+       SET_SURV_FS_W10 = 58 /* read: the last pulse's about W at the port x10 | its lowest battery mV << 8 */,
+       SET_SURV_FS_KEYS = 59 /* write the fire page's hold id (refresh at least every 2 s; 0 ends it): Power short =
+                                Select, Power held 1 s = that hold (EV_APP_HOLD), the output only while Power stays
+                                down; no screen-off / power menu from Power meanwhile */,
+       SET_SURV_FS_VBYP = 60 /* read: the last pulse's mean boost output (the gauge's VBYP) mV | 0.1 W from the cell
+                                << 16; SET_SURV_FS's pulse codes 3 = 3 s, 4 = 5 s (no override); SET_SURV_FS
+                                bit 13: the steel-wool preset (the chip's own retry let run, no override) */,
+       SET_SURV_FS_SPLIT = 61 /* read: the last pulse's 0.1 W into the load | 0.1 W lost in the chip's switch << 16 */,
+       SET_SURV_FS_LIVE = 62 /* read: re-arms in this hold (14 bits) | seconds on << 14 (10 bits) | the boost's
+                                VBYPSET code << 24 (6 bits) | the load open (under 50 mA) << 30; override 3 = MAX
+                                (continuous, no cooldown; also the heater-wire mode: steady while held) */,
+       SET_SURV_FS_OHM = 63 /* read: the last window's load, 0.1 ohm (VBYP / I with no limit event); -1 unknown,
+                               -2 at the chip's limit (under ~3.4 ohm: lengthen the coil) */,
+       SET_SURV_FS_OVOK = 64 /* read: 1 the override modes may run on this phone (the card's
+                                /STARBITE/FIRE/OVERRIDE.TXT; the test phone only), 0 not (the kernel refuses them) */ };
+/* SET_SURV_FS_INFO's reason codes (kern/survival.h SURV_FS_WHY_*) */
+enum { FS_WHY_NONE, FS_WHY_DONE, FS_WHY_RELEASED, FS_WHY_ILIM, FS_WHY_VBUS, FS_WHY_FAULT, FS_WHY_HOT, FS_WHY_LOWBAT,
+       FS_WHY_STOP, FS_WHY_REFUSED, FS_WHY_COOL, FS_WHY_FINGER };
 
 /* 1.0-rc3: the full-heat battery data for the minutes-left estimates (Heat's confirmation and its live readout).
  * Measured on the phone (rc2, 2026-11-08, Manual flat out, 7 cores + GPU): 2.8 A at 3.67 V (about 10 W; peak 2.86 A),

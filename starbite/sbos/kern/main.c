@@ -180,6 +180,49 @@ void sbos_spsel1(void);
  * speed (sd.c's wrapper); a card without High Speed gets S-Boot's divider back (6.25 MHz, as before) */
 #define SBOS_SD_FAST
 
+/* 1.2-alpha30: the touch controller's power as the loader's menu gives it (shim/starlte/menu.c tp_power +
+ * tp_platform). A start that skipped the menu (fastboot boot from the loader's fastboot mode; main 11-16: no touch
+ * on S9 #2's RAM boot) left the rails off or CMU_PERIC0's gates closed. Same checks as the menu: LDO35 at 0x2c
+ * (3.3 V) or 0 and LDO43 at 0 or 0x28..0x3c, else nothing is written; the rails are only switched on, never changed;
+ * then the four touch gates and the USI03 clock opened. 1 done (or already so) */
+static int touch_bringup(void)
+{
+    uint8_t l35 = 0, l43 = 0;
+    if (!sb_pmic_read(1, 0x6c, &l35) || !sb_pmic_read(1, 0x74, &l43))
+        return 0;
+    if (((l35 & 0x3fU) != 0x2cU && (l35 & 0x3fU) != 0) ||
+        ((l43 & 0x3fU) != 0 && ((l43 & 0x3fU) < 0x28U || (l43 & 0x3fU) > 0x3cU))) {
+        sb_log("sbos: touch rails at unexpected values: not touched");
+        return 0;
+    }
+    if ((l35 & 0xc0U) != 0xc0U || (l43 & 0xc0U) != 0xc0U) {
+        static const struct { uint8_t reg, val; } w[2] = { { 0x6c, 0xec }, { 0x74, 0xf0 } };
+        for (unsigned i = 0; i < 2; ++i) {
+            struct sb_auth a;
+            sb_auth_init(&a, SB_SP_PMIC, 0, 1U << 8 | w[i].reg, 1, SB_TIER1, 0, "touch: rails on, as the loader's menu");
+            sb_auth_step(&a, SB_STEP_WARN);
+            sb_auth_step(&a, SB_STEP_HELD);
+            int ok = sb_gate_open(&a) && sb_pmic_write(1, w[i].reg, w[i].val, SB_TIER1);
+            sb_gate_close();
+            if (!ok)
+                return 0;
+        }
+        sb_mdelay(150);                     /* supplies up, the S6SY761 boots its firmware */
+    }
+    static const uint32_t gates[4] = { 0x2018, 0x206c, 0x20dc, 0x20e0 };
+    for (unsigned i = 0; i < 4; ++i) {
+        volatile uint32_t *g = (volatile uint32_t *)(0x10400000UL + gates[i]);
+        if ((*g & 0x00300000U) != 0x00300000U)
+            *g |= 0x00300000U;
+    }
+    volatile uint32_t *c = (volatile uint32_t *)(0x10400000UL + 0x3038);
+    if ((*c & 3U) != 3U)
+        *c |= 3U;
+    __asm__ volatile("dsb sy" : : : "memory");
+    sb_log("sbos: touch power as the loader's menu: rails on, CMU_PERIC0 gates open");
+    return 1;
+}
+
 void sb_main(void)
 {
 #ifndef SB_HOST
@@ -239,8 +282,13 @@ void sb_main(void)
     sb_gpu_wait_hook = guest_pump;          /* cp7n: a booting guest's small reads served while a frame waits on the GPU, with
                                              * Track E's budget (one read <= 64 KiB a call, at most 2 ms per 16.7 ms). 7l's
                                              * unbudgeted pump made 25-31 ms GPU waits while Linux booted (7m: off) */
-    if (!sb_touch_start())
-        sb_log("sbos: no touch");
+    if (!sb_touch_start()) {
+        sb_logf("sbos: touch did not start: ", sb_tp.why ? sb_tp.why : "?");
+        if (touch_bringup() && sb_touch_start())
+            sb_log("sbos: touch up after Starbite OS powered it (a boot that skipped the loader's menu)");
+        else
+            sb_log("sbos: no touch");
+    }
     input_init();
     power_init();
     heater_init();
