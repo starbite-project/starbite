@@ -241,6 +241,14 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
   is on hold; T80 / T80b find the trigger and compare with the user's driver. This is now item 1's open part and
   the first priority: a driver that passes tests but stalls the desktop when a browser starts is not usable.
 
+- **11-16 07:15, T77 and its cause:** the first run of the new tree never got to a test: DWM and LogonUI
+  crashed at driver load (`WIN11-GPU.md` 6.105-6.106: a C++ static initializer from generated code, which our
+  ARM64X DLL runs from the wrong half). Fixed in the build; the build now fails on any C++ initializer in the image.
+  Rebuilt: `sb-nir` 430b803 (with tessellation), sbumd 63cb8404, `build/win/umd-nir-boot1`. Staged for the evening:
+  T81 (five-minute boot check) and, only if it passes, T82 (eight conformance passes incl. tessellation).
+- **Rule from T77:** offline checks do not execute the Windows-only code or the DLL load; every build from an
+  unbooted tree gets the boot check first (`tools/win/smoke-stage.sh`).
+
 ## What this means for the two test apps
 - **Geometry Dash:** items 1 and 9. T71 measures the first step.
 - **BeamNG.drive:** item 6 (feature level 11_0) is the gate; before that the game cannot create its device. Items
