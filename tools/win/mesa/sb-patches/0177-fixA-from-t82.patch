@@ -1,0 +1,1279 @@
+From 422fd0766391a90b997a51facdc1848463d54638 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 18:35:54 +0200
+Subject: [PATCH 1/8] d3d10umd: the NIR translator records which texture and
+ sampler slots a shader reads
+
+T82 pass N (nirshaders): buffer_srv, copy_subresource_region,
+depth_stencil_sampling, initial_texture_data, null_sampler, rtv_depth_slice,
+shader_input_registers_limits, swapchain_flip, texture1d, texture,
+texture_compressed_3d, unbind_shader_resource_view, update_subresource pass
+with the TGSI translator and fail with this one: every lookup reads nothing
+(the draw leaves the target as it was).
+
+Cause: info.textures_used / textures_used_by_txf / samplers_used were never
+set. nir_lower_samplers and nir_shader_gather_info do not record them (the
+GLSL linker and tgsi_to_nir do it themselves), and Panfrost's shader
+descriptor takes texture_count and sampler_count from textures_used
+(pan_compiler.c), so every shader said "0 textures". info.texture_buffers,
+derived from textures_used here, was empty too.
+
+sn_gather_textures_used() walks the texture instructions left after the
+cleanup.
+
+Harness: every shader compiled for Bifrost has its texture instructions
+compared with pan_shader_info.texture_count / sampler_count and
+info.texture_buffers. Before this change 94 of 468 shaders failed that check
+through the new translator (0 of 235 through the old); now 0. Two self
+tests (a texture in slot 5 with a buffer in slot 7; slot 0).
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/gallium/frontends/d3d10umd/ShaderNIR.c    | 41 +++++++++++
+ .../d3d10umd/tests/dxbc_nir_harness.c         | 68 +++++++++++++++++++
+ .../d3d10umd/tests/dxbc_nir_selftest.c        | 47 +++++++++++++
+ 3 files changed, 156 insertions(+)
+
+diff --git a/src/gallium/frontends/d3d10umd/ShaderNIR.c b/src/gallium/frontends/d3d10umd/ShaderNIR.c
+index 93ff6d2..b7f15cd 100644
+--- a/src/gallium/frontends/d3d10umd/ShaderNIR.c
++++ b/src/gallium/frontends/d3d10umd/ShaderNIR.c
+@@ -5030,6 +5030,38 @@ sn_optimize(nir_shader *nir)
+    } while (progress);
+ }
+ 
++/* textures_used, textures_used_by_txf and samplers_used from the texture
++ * instructions that are left after the cleanup.
++ */
++static void
++sn_gather_textures_used(nir_shader *nir)
++{
++   BITSET_ZERO(nir->info.textures_used);
++   BITSET_ZERO(nir->info.textures_used_by_txf);
++   BITSET_ZERO(nir->info.samplers_used);
++
++   nir_foreach_function_impl(impl, nir) {
++      nir_foreach_block(block, impl) {
++         nir_foreach_instr(instr, block) {
++            nir_tex_instr *tex;
++
++            if (instr->type != nir_instr_type_tex)
++               continue;
++            tex = nir_instr_as_tex(instr);
++
++            if (tex->texture_index < SN_MAX_RESOURCES) {
++               BITSET_SET(nir->info.textures_used, tex->texture_index);
++               if (tex->op == nir_texop_txf || tex->op == nir_texop_txf_ms)
++                  BITSET_SET(nir->info.textures_used_by_txf, tex->texture_index);
++            }
++            if (nir_tex_instr_need_sampler(tex) &&
++                tex->sampler_index < SN_MAX_SAMPLERS)
++               BITSET_SET(nir->info.samplers_used, tex->sampler_index);
++         }
++      }
++   }
++}
++
+ static void
+ sn_finalize(struct sn_xlate *sx)
+ {
+@@ -5089,6 +5121,15 @@ sn_finalize(struct sn_xlate *sx)
+    sn_optimize(nir);
+    nir_shader_gather_info(nir, sx->impl);
+ 
++   /* Which sampler view and sampler state slots the code reads. Neither
++    * nir_lower_samplers nor nir_shader_gather_info records it (the GLSL
++    * linker and tgsi_to_nir do it themselves), and Panfrost takes the
++    * texture and sampler counts of the shader's descriptor from it: without
++    * it the count is 0 and every lookup reads nothing (T82: every test that
++    * samples a texture).
++    */
++   sn_gather_textures_used(nir);
++
+    /* Not derived by nir_shader_gather_info; Bifrost needs it to give buffer
+     * resources a descriptor (sb-patches/0118).
+     */
+diff --git a/src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness.c b/src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness.c
+index 3cd79cd..6afdd16 100644
+--- a/src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness.c
++++ b/src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness.c
+@@ -662,12 +662,74 @@ panfrost_compile(nir_shader *nir)
+    return panfrost_compile_lowered(nir, false);
+ }
+ 
++/* The texture and sampler counts Panfrost puts in a Bifrost shader's
++ * descriptor come from pan_shader_info, which takes them from
++ * info.textures_used / samplers_used, and a buffer resource is reached
++ * through an attribute counted from info.texture_buffers. A translator that
++ * leaves these empty gives code that compiles and reads nothing (T82, pass N:
++ * every texture test). Check them against the texture instructions.
++ */
++struct tex_slots {
++   int max_texture;
++   int max_sampler;
++   int max_buffer;
++};
++
++static void
++collect_tex_slots(nir_shader *nir, struct tex_slots *slots)
++{
++   slots->max_texture = slots->max_sampler = slots->max_buffer = -1;
++
++   nir_foreach_function_impl(impl, nir) {
++      nir_foreach_block(block, impl) {
++         nir_foreach_instr(instr, block) {
++            nir_tex_instr *tex;
++
++            if (instr->type != nir_instr_type_tex)
++               continue;
++            tex = nir_instr_as_tex(instr);
++
++            slots->max_texture = MAX2(slots->max_texture, (int)tex->texture_index);
++            if (nir_tex_instr_need_sampler(tex))
++               slots->max_sampler = MAX2(slots->max_sampler, (int)tex->sampler_index);
++            if (tex->sampler_dim == GLSL_SAMPLER_DIM_BUF && tex->op == nir_texop_txf)
++               slots->max_buffer = MAX2(slots->max_buffer, (int)tex->texture_index);
++         }
++      }
++   }
++}
++
++static bool
++check_tex_slots(const nir_shader *nir, const struct tex_slots *slots,
++                const struct pan_shader_info *info)
++{
++   bool ok = true;
++
++   if (slots->max_texture >= (int)info->texture_count) {
++      fprintf(stderr, "texture slots: the code reads sampler view %d, the shader descriptor counts %u textures\n",
++              slots->max_texture, info->texture_count);
++      ok = false;
++   }
++   if (slots->max_sampler >= (int)info->sampler_count) {
++      fprintf(stderr, "texture slots: the code uses sampler %d, the shader descriptor counts %u samplers\n",
++              slots->max_sampler, info->sampler_count);
++      ok = false;
++   }
++   if (slots->max_buffer >= (int)BITSET_LAST_BIT(nir->info.texture_buffers)) {
++      fprintf(stderr, "texture slots: the code loads from buffer view %d, info.texture_buffers ends at %u\n",
++              slots->max_buffer, (unsigned)BITSET_LAST_BIT(nir->info.texture_buffers));
++      ok = false;
++   }
++   return ok;
++}
++
+ /* The rest, for a shader whose I/O is lowered: also what the pieces a
+  * geometry shader is turned into go through.
+  */
+ static unsigned
+ panfrost_compile_lowered(nir_shader *nir, bool no_idvs)
+ {
++   struct tex_slots tex_slots;
+    uint64_t gpu_id = opt.gpu_id;
+    struct pan_varying_layout varying_layout = { 0 };
+    struct pan_compile_inputs inputs = { .gpu_id = gpu_id };
+@@ -686,6 +748,7 @@ panfrost_compile_lowered(nir_shader *nir, bool no_idvs)
+    }
+ 
+    s = nir_shader_clone(NULL, nir);
++   collect_tex_slots(s, &tex_slots);
+ 
+    inputs.trust_varying_flat_highp_types = false;
+    /* A separately created pixel shader has no vertex shader layout. */
+@@ -722,6 +785,11 @@ panfrost_compile_lowered(nir_shader *nir, bool no_idvs)
+ 
+    pan_shader_compile(s, &inputs, &binary, &info);
+ 
++   if (pan_arch(gpu_id) < 9 && !check_tex_slots(nir, &tex_slots, &info)) {
++      fflush(NULL);
++      _exit(3);
++   }
++
+    size = binary.size;
+    util_dynarray_fini(&binary);
+    ralloc_free(s);
+diff --git a/src/gallium/frontends/d3d10umd/tests/dxbc_nir_selftest.c b/src/gallium/frontends/d3d10umd/tests/dxbc_nir_selftest.c
+index 4bf6079..da075e7 100644
+--- a/src/gallium/frontends/d3d10umd/tests/dxbc_nir_selftest.c
++++ b/src/gallium/frontends/d3d10umd/tests/dxbc_nir_selftest.c
+@@ -821,6 +821,51 @@ texture_test(void)
+    finish(&t, "ps41_textures", NULL);
+ }
+ 
++/* The slots a shader reads must reach the driver's shader descriptor: a
++ * texture in a slot above 0, a sampler numbered above every texture, and a
++ * buffer resource (the harness compares pan_shader_info and
++ * info.texture_buffers with the texture instructions of every shader it
++ * compiles; T82 pass N had 0 textures in every descriptor).
++ */
++static void
++texture_slot_test(const char *name, unsigned tex_slot, unsigned sampler_slot, bool buffer)
++{
++   struct tpf t;
++
++   begin(&t, D3D10_SB_PIXEL_SHADER, 0);
++   dcl_resource(&t, tex_slot, D3D10_SB_RESOURCE_DIMENSION_TEXTURE2D, D3D10_SB_RETURN_TYPE_FLOAT);
++   if (buffer)
++      dcl_resource(&t, tex_slot + 2, D3D10_SB_RESOURCE_DIMENSION_BUFFER, D3D10_SB_RETURN_TYPE_FLOAT);
++   dcl_sampler(&t, sampler_slot, D3D10_SB_SAMPLER_MODE_DEFAULT);
++   dcl_input_ps(&t, 0, ALL, D3D10_SB_INTERPOLATION_LINEAR, 0, false);
++   dcl_output(&t, 0, ALL, 0);
++   dcl_temps(&t, 2);
++
++   /* sample r0, v0.xyxx, tN.xyzw, sM */
++   op(&t, D3D10_SB_OPCODE_SAMPLE, 0);
++   reg(&t, T_TEMP, 0, MASK(ALL));
++   reg(&t, T_IN, 0, SWZ(0, 1, 0, 0));
++   reg(&t, T_RES, tex_slot, XYZW);
++   reg(&t, T_SAMP, sampler_slot, C0);
++   if (buffer) {
++      /* ftoi r1, v0; ld r1, r1.xxxx, tN+2.xyzw; add r0, r0, r1 */
++      op(&t, D3D10_SB_OPCODE_FTOI, 0);
++      reg(&t, T_TEMP, 1, MASK(ALL));
++      reg(&t, T_IN, 0, XYZW);
++      op(&t, D3D10_SB_OPCODE_LD, 0);
++      reg(&t, T_TEMP, 1, MASK(ALL));
++      reg(&t, T_TEMP, 1, SWZ(0, 0, 0, 0));
++      reg(&t, T_RES, tex_slot + 2, XYZW);
++      op(&t, D3D10_SB_OPCODE_ADD, 0);
++      reg(&t, T_TEMP, 0, MASK(ALL));
++      reg(&t, T_TEMP, 0, XYZW);
++      reg(&t, T_TEMP, 1, XYZW);
++   }
++   return_temp(&t, 0);
++
++   finish(&t, name, NULL);
++}
++
+ /* sampleinfo / samplepos, each in a shader of its own: the backend lacks
+  * some of what they need and the report should say which.
+  */
+@@ -1732,6 +1777,8 @@ selftest_add_shaders(void)
+    indexable_temp_test();
+ 
+    texture_test();
++   texture_slot_test("ps_texture_slot0", 0, 0, false);
++   texture_slot_test("ps_texture_slot5_buffer7", 5, 1, true);
+    sample_query_test("ps41_sampleinfo", false, false, false);
+    sample_query_test("ps41_sampleinfo_uint", false, false, true);
+    sample_query_test("ps41_sampleinfo_rasterizer", false, true, false);
+-- 
+2.43.0
+
+From 0149fb53e5e9171a51d899565df09ea495064585 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 18:35:54 +0200
+Subject: [PATCH 2/8] panfrost: the sampler count of a shader covers samplers
+ numbered above its textures
+
+pan_shader_info.sampler_count was the texture count (GL's combined samplers).
+A Direct3D shader pairs any sampler with any resource: t0 read through s6
+gave a descriptor with 1 sampler and code that uses sampler 6. Both
+translators record samplers_used; take the larger of the two. The count
+never gets smaller, and a GL shader's stays what it was.
+
+Found by the harness check of the previous commit with a self test
+(ps_sampler_above_textures); no T82 test is known to depend on it. Whether
+Bifrost enforces the count was not measured.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/gallium/frontends/d3d10umd/tests/dxbc_nir_selftest.c | 1 +
+ src/panfrost/compiler/pan_compiler.c                     | 6 ++++++
+ 2 files changed, 7 insertions(+)
+
+diff --git a/src/gallium/frontends/d3d10umd/tests/dxbc_nir_selftest.c b/src/gallium/frontends/d3d10umd/tests/dxbc_nir_selftest.c
+index da075e7..bf61234 100644
+--- a/src/gallium/frontends/d3d10umd/tests/dxbc_nir_selftest.c
++++ b/src/gallium/frontends/d3d10umd/tests/dxbc_nir_selftest.c
+@@ -1779,6 +1779,7 @@ selftest_add_shaders(void)
+    texture_test();
+    texture_slot_test("ps_texture_slot0", 0, 0, false);
+    texture_slot_test("ps_texture_slot5_buffer7", 5, 1, true);
++   texture_slot_test("ps_sampler_above_textures", 0, 6, false);
+    sample_query_test("ps41_sampleinfo", false, false, false);
+    sample_query_test("ps41_sampleinfo_uint", false, false, true);
+    sample_query_test("ps41_sampleinfo_rasterizer", false, true, false);
+diff --git a/src/panfrost/compiler/pan_compiler.c b/src/panfrost/compiler/pan_compiler.c
+index cd6f231..6dabd4f 100644
+--- a/src/panfrost/compiler/pan_compiler.c
++++ b/src/panfrost/compiler/pan_compiler.c
+@@ -304,6 +304,12 @@ pan_shader_update_info(struct pan_shader_info *info, nir_shader *s,
+ 
+    info->sampler_count = info->texture_count =
+       BITSET_LAST_BIT(s->info.textures_used);
++   /* Starbite: Direct3D pairs any sampler with any resource, so a sampler
++    * can be numbered above every texture (t0 read through s6). GL's combined
++    * samplers never are, and there the two counts stay equal.
++    */
++   info->sampler_count =
++      MAX2(info->sampler_count, BITSET_LAST_BIT(s->info.samplers_used));
+ 
+    unsigned execution_mode = s->info.float_controls_execution_mode;
+    info->ftz_fp16 = nir_is_denorm_flush_to_zero(execution_mode, 16);
+-- 
+2.43.0
+
+From a0b8c946d8404a39b494c037014608bad4e26d92 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 18:44:39 +0200
+Subject: [PATCH 3/8] d3d10umd: a vertex or pixel shader the TGSI translator
+ refuses goes through NIR
+
+T82 pass O (no flag files): test_cube_maps, test_sample_c_lz and
+test_unbound_multisample_texture crash. Each creates a pixel shader with a
+switch; ShaderTGSI.c refuses it ("no TGSI translation for opcode
+D3D10_SB_OPCODE_SWITCH", tgsi_to_nir has none), the creation fails with
+E_OUTOFMEMORY and the test dereferences the missing shader. In pass N the
+NIR translator made the same three shaders.
+
+Without the nirshaders switch the NIR translator is now asked when, and only
+when, the TGSI one returned nothing (SbTranslateNirAfterTgsiRefusal): also
+lod, gather4, samplepos, sampleinfo. A shader the TGSI translator takes is
+created exactly as before. The stream output variant of a vertex shader that
+is NIR is translated by NIR whatever the switch says.
+
+Compiled only. The three shaders translate and compile for Bifrost in the
+host harness (d3d10core.c:7843, 8403, 17805: "OK" through NIR, "the TGSI
+translator refused the shader" through TGSI).
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/gallium/frontends/d3d10umd/Shader.cpp | 61 ++++++++++++++++++++---
+ 1 file changed, 53 insertions(+), 8 deletions(-)
+
+diff --git a/src/gallium/frontends/d3d10umd/Shader.cpp b/src/gallium/frontends/d3d10umd/Shader.cpp
+index f0c60bb..c18cf40 100644
+--- a/src/gallium/frontends/d3d10umd/Shader.cpp
++++ b/src/gallium/frontends/d3d10umd/Shader.cpp
+@@ -163,11 +163,12 @@ SbSignatureEntries(const D3D10DDIARG_STAGE_IO_SIGNATURES *pSignatures, unsigned
+ 
+ static struct nir_shader *
+ SbTranslateNirSig(Device *pDevice, mesa_shader_stage stage, const UINT *pCode,
+-                  const struct Shader_nir_signature *signature, unsigned *output_mapping);
++                  const struct Shader_nir_signature *signature, unsigned *output_mapping, bool force = false);
+ 
++/* force: also without the nirshaders switch (SbTranslateNirAfterTgsiRefusal) */
+ static struct nir_shader *
+ SbTranslateNir(Device *pDevice, mesa_shader_stage stage, const UINT *pCode,
+-               const D3D10DDIARG_STAGE_IO_SIGNATURES *pSignatures, unsigned *output_mapping)
++               const D3D10DDIARG_STAGE_IO_SIGNATURES *pSignatures, unsigned *output_mapping, bool force = false)
+ {
+    unsigned num_in, num_out;
+    struct Shader_nir_signature_entry *entries = SbSignatureEntries(pSignatures, &num_in, &num_out);
+@@ -175,18 +176,18 @@ SbTranslateNir(Device *pDevice, mesa_shader_stage stage, const UINT *pCode,
+       return NULL;
+    struct Shader_nir_signature signature = { entries, num_in, entries + num_in, num_out };
+ 
+-   struct nir_shader *nir = SbTranslateNirSig(pDevice, stage, pCode, &signature, output_mapping);
++   struct nir_shader *nir = SbTranslateNirSig(pDevice, stage, pCode, &signature, output_mapping, force);
+    free(entries);
+    return nir;
+ }
+ 
+ static struct nir_shader *
+ SbTranslateNirSig(Device *pDevice, mesa_shader_stage stage, const UINT *pCode,
+-                  const struct Shader_nir_signature *signature, unsigned *output_mapping)
++                  const struct Shader_nir_signature *signature, unsigned *output_mapping, bool force)
+ {
+    struct pipe_screen *screen = pDevice->screen;
+ 
+-   if (!SbNirShaders() ||
++   if ((!force && !SbNirShaders()) ||
+        (screen->shader_caps[stage].supported_irs & (1 << PIPE_SHADER_IR_TGSI)) ||
+        !(screen->shader_caps[stage].supported_irs & (1 << PIPE_SHADER_IR_NIR)) ||
+        !screen->nir_options[stage])
+@@ -318,7 +319,7 @@ SbVsStreamOutputVariant(Device *pDevice, Shader *vs, Shader *so)
+       if (vs->sb_code && vs->sb_sig) {
+          struct Shader_nir_signature signature = { vs->sb_sig, vs->sb_sig_in, vs->sb_sig + vs->sb_sig_in,
+                                                    vs->sb_sig_out };
+-         nir = SbTranslateNirSig(pDevice, MESA_SHADER_VERTEX, vs->sb_code, &signature, mapping);
++         nir = SbTranslateNirSig(pDevice, MESA_SHADER_VERTEX, vs->sb_code, &signature, mapping, true);
+       }
+       if (!nir)
+          why = "the vertex shader could not be translated again";
+@@ -363,6 +364,30 @@ SbVsStreamOutputVariant(Device *pDevice, Shader *vs, Shader *so)
+ }
+ 
+ 
++/*
++ * Without the nirshaders switch, a vertex or pixel shader the TGSI translator refuses (switch, lod, gather4,
++ * samplepos, sampleinfo: it said which) is given to the NIR translator instead of failing the creation. T82
++ * pass O: test_cube_maps, test_sample_c_lz and test_unbound_multisample_texture each lost a pixel shader with a
++ * switch this way and then crashed on the missing object; the same shaders were created in pass N. Nothing
++ * changes for a shader the TGSI translator takes. NULL if the NIR translator refuses it too, or the switch is
++ * on (it was asked first then).
++ */
++static struct nir_shader *
++SbTranslateNirAfterTgsiRefusal(Device *pDevice, mesa_shader_stage stage, const UINT *pCode,
++                               const D3D10DDIARG_STAGE_IO_SIGNATURES *pSignatures, unsigned *output_mapping)
++{
++   static unsigned said;
++
++   if (SbNirShaders())
++      return NULL;
++
++   struct nir_shader *nir = SbTranslateNir(pDevice, stage, pCode, pSignatures, output_mapping, true);
++   if (nir && said++ < 4)
++      DebugPrintf("sbumd: the shader the TGSI translator refused goes through DXBC -> NIR\n");
++   return nir;
++}
++
++
+ /*
+  * Neither translator has a shader for this code (the TGSI one refuses lod, gather4, samplepos, sampleinfo and
+  * anything past Shader Model 4.1, and said which). Fail the creation: E_OUTOFMEMORY is the one error the runtime
+@@ -987,7 +1012,16 @@ CreateVertexShader(D3D10DDI_HDEVICE hDevice,                                  //
+ 
+    pShader->state.tokens = Shader_tgsi_translate(pCode, pShader->output_mapping);
+    if (!pShader->state.tokens) {
+-      SbShaderRefused(hDevice, pShader);
++      nir = SbTranslateNirAfterTgsiRefusal(CastDevice(hDevice), MESA_SHADER_VERTEX, pCode, pSignatures,
++                                           pShader->output_mapping);
++      if (!nir) {
++         SbShaderRefused(hDevice, pShader);
++         return;
++      }
++      SbUseNir(pShader, nir);
++      pShader->handle = pipe->create_vs_state(pipe, &pShader->state);
++      pShader->state.ir.nir = NULL;
++      SbKeepVertexShaderSource(pShader, pCode, pSignatures);
+       return;
+    }
+ 
+@@ -1623,7 +1657,18 @@ CreatePixelShader(D3D10DDI_HDEVICE hDevice,                                // IN
+    pShader->state.tokens = Shader_tgsi_translate(pShaderCode,
+                                                  pShader->output_mapping);
+    if (!pShader->state.tokens) {
+-      SbShaderRefused(hDevice, pShader);
++      nir = SbTranslateNirAfterTgsiRefusal(CastDevice(hDevice), MESA_SHADER_FRAGMENT, pShaderCode, pSignatures,
++                                           pShader->output_mapping);
++      if (!nir) {
++         SbShaderRefused(hDevice, pShader);
++         return;
++      }
++      pShader->writes_o1 = (nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DATA1)) != 0;
++      if (pShader->writes_o1)
++         pShader->sb_dual_nir = nir_shader_clone(NULL, nir);
++      SbUseNir(pShader, nir);
++      pShader->handle = pipe->create_fs_state(pipe, &pShader->state);
++      pShader->state.ir.nir = NULL;
+       return;
+    }
+ 
+-- 
+2.43.0
+
+From 9a1c5d5e8034dc9d2cce43172626feddbad7470f Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 18:44:39 +0200
+Subject: [PATCH 4/8] d3d10umd: multisampling is answered per format family,
+ depth formats included
+
+T82 passes M, D, F, T (flag file msaa): every test ran on the Basic Render
+Driver. In each process the driver log ends with
+  CheckFormatSupport DXGI_FORMAT_D32_FLOAT_S8X24_UINT (20) -> ...: caps 0x1
+The runtime walks the formats family by family, typeless first, asks each
+format's capabilities and then its quality levels at 2, 4, 8, 16 samples,
+and drops the device at the first member whose answer the family's typeless
+format does not back (T76b: R32G32B32_TYPELESS without the multisample bit,
+R32G32B32_FLOAT one level at 4x, last line). Here CheckFormatSupport gave
+D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET only to colour render
+targets, so R32G8X24_TYPELESS and the depth formats never had it, while
+CheckMultisampleQualityLevels answered one level for a depth format that
+Panfrost multisamples.
+
+Now one answer per family (SbFormatFamily / SbFamilyMultisample): a sample
+count is supported when every member that is a colour render target or a
+depth buffer takes it; every member reports the same number of levels; the
+capability bit is set on the typeless format, the colour render targets and
+the depth formats (D32_FLOAT_S8X24_UINT, D32_FLOAT, D24_UNORM_S8_UINT,
+D16_UNORM, R32G8X24_TYPELESS, R24G8_TYPELESS) of a family with levels.
+Nothing changes without the flag file msaa.
+
+The quality level answers are logged up to 640 lines instead of 24, so the
+next run shows where the walk stops if it still does.
+
+Compiled only; the rule is inferred from two logs, not documented.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/gallium/frontends/d3d10umd/Device.cpp | 192 +++++++++++++++++++---
+ 1 file changed, 172 insertions(+), 20 deletions(-)
+
+diff --git a/src/gallium/frontends/d3d10umd/Device.cpp b/src/gallium/frontends/d3d10umd/Device.cpp
+index ec398ef..85c7d8a 100644
+--- a/src/gallium/frontends/d3d10umd/Device.cpp
++++ b/src/gallium/frontends/d3d10umd/Device.cpp
+@@ -589,6 +589,158 @@ Flush(D3D10DDI_HDEVICE hDevice)  // IN
+  * ----------------------------------------------------------------------
+  */
+ 
++/*
++ * Multisampling is answered per format family (the typeless format and the formats a resource of it can be viewed
++ * as), not per format. The runtime walks the formats family by family, the typeless one first, asking the
++ * capabilities of each and then the quality levels at 2, 4, 8 and 16 samples, and gives up the device (the
++ * application then gets the Basic Render Driver) at the first answer of a member that its family's typeless
++ * format does not back:
++ *   T76b: R32G32B32_TYPELESS without the multisample capability, R32G32B32_FLOAT "x4: 1": the last line.
++ *   T82 pass M: R32G8X24_TYPELESS and D32_FLOAT_S8X24_UINT answered capabilities 0x1 (no multisample bit; this
++ *   function only gave the bit to formats that are colour render targets) while CheckMultisampleQualityLevels
++ *   answered 1 level at 4 samples for the depth format: the last line of every process is the capability line
++ *   of D32_FLOAT_S8X24_UINT.
++ * So: one answer per family, which is yes for a sample count when every member that is a colour render target
++ * or a depth buffer takes it; the multisample capability bit on the typeless format, on every colour render
++ * target and on the depth formats of a family that has levels; and the same number of levels from every member.
++ * (VirtualBox's WDDM driver, which the runtime accepts, also keys both answers on one per-format bit that its
++ * host sets for depth formats.)
++ */
++static DXGI_FORMAT
++SbFormatFamily(DXGI_FORMAT Format)
++{
++   switch (Format) {
++   case DXGI_FORMAT_R32G32B32A32_FLOAT:
++   case DXGI_FORMAT_R32G32B32A32_UINT:
++   case DXGI_FORMAT_R32G32B32A32_SINT:
++      return DXGI_FORMAT_R32G32B32A32_TYPELESS;
++   case DXGI_FORMAT_R32G32B32_FLOAT:
++   case DXGI_FORMAT_R32G32B32_UINT:
++   case DXGI_FORMAT_R32G32B32_SINT:
++      return DXGI_FORMAT_R32G32B32_TYPELESS;
++   case DXGI_FORMAT_R16G16B16A16_FLOAT:
++   case DXGI_FORMAT_R16G16B16A16_UNORM:
++   case DXGI_FORMAT_R16G16B16A16_UINT:
++   case DXGI_FORMAT_R16G16B16A16_SNORM:
++   case DXGI_FORMAT_R16G16B16A16_SINT:
++      return DXGI_FORMAT_R16G16B16A16_TYPELESS;
++   case DXGI_FORMAT_R32G32_FLOAT:
++   case DXGI_FORMAT_R32G32_UINT:
++   case DXGI_FORMAT_R32G32_SINT:
++      return DXGI_FORMAT_R32G32_TYPELESS;
++   case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
++   case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
++   case DXGI_FORMAT_X32_TYPELESS_G8X24_UINT:
++      return DXGI_FORMAT_R32G8X24_TYPELESS;
++   case DXGI_FORMAT_R10G10B10A2_UNORM:
++   case DXGI_FORMAT_R10G10B10A2_UINT:
++   case DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM:
++      return DXGI_FORMAT_R10G10B10A2_TYPELESS;
++   case DXGI_FORMAT_R8G8B8A8_UNORM:
++   case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
++   case DXGI_FORMAT_R8G8B8A8_UINT:
++   case DXGI_FORMAT_R8G8B8A8_SNORM:
++   case DXGI_FORMAT_R8G8B8A8_SINT:
++      return DXGI_FORMAT_R8G8B8A8_TYPELESS;
++   case DXGI_FORMAT_R16G16_FLOAT:
++   case DXGI_FORMAT_R16G16_UNORM:
++   case DXGI_FORMAT_R16G16_UINT:
++   case DXGI_FORMAT_R16G16_SNORM:
++   case DXGI_FORMAT_R16G16_SINT:
++      return DXGI_FORMAT_R16G16_TYPELESS;
++   case DXGI_FORMAT_D32_FLOAT:
++   case DXGI_FORMAT_R32_FLOAT:
++   case DXGI_FORMAT_R32_UINT:
++   case DXGI_FORMAT_R32_SINT:
++      return DXGI_FORMAT_R32_TYPELESS;
++   case DXGI_FORMAT_D24_UNORM_S8_UINT:
++   case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
++   case DXGI_FORMAT_X24_TYPELESS_G8_UINT:
++      return DXGI_FORMAT_R24G8_TYPELESS;
++   case DXGI_FORMAT_R8G8_UNORM:
++   case DXGI_FORMAT_R8G8_UINT:
++   case DXGI_FORMAT_R8G8_SNORM:
++   case DXGI_FORMAT_R8G8_SINT:
++      return DXGI_FORMAT_R8G8_TYPELESS;
++   case DXGI_FORMAT_R16_FLOAT:
++   case DXGI_FORMAT_D16_UNORM:
++   case DXGI_FORMAT_R16_UNORM:
++   case DXGI_FORMAT_R16_UINT:
++   case DXGI_FORMAT_R16_SNORM:
++   case DXGI_FORMAT_R16_SINT:
++      return DXGI_FORMAT_R16_TYPELESS;
++   case DXGI_FORMAT_R8_UNORM:
++   case DXGI_FORMAT_R8_UINT:
++   case DXGI_FORMAT_R8_SNORM:
++   case DXGI_FORMAT_R8_SINT:
++      return DXGI_FORMAT_R8_TYPELESS;
++   case DXGI_FORMAT_B8G8R8A8_UNORM:
++   case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
++      return DXGI_FORMAT_B8G8R8A8_TYPELESS;
++   case DXGI_FORMAT_B8G8R8X8_UNORM:
++   case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
++      return DXGI_FORMAT_B8G8R8X8_TYPELESS;
++   default:
++      /* the typeless formats themselves, the formats without a family, and the block-compressed ones (never a
++       * render target) */
++      return Format;
++   }
++}
++
++static bool
++SbIsDepthFormat(DXGI_FORMAT Format)
++{
++   return Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT || Format == DXGI_FORMAT_D32_FLOAT ||
++          Format == DXGI_FORMAT_D24_UNORM_S8_UINT || Format == DXGI_FORMAT_D16_UNORM;
++}
++
++/* Can Format itself be drawn to with this many samples (0: at all)? known: it is a colour render target or a
++ * depth buffer in the first place. */
++static bool
++SbFormatTargetSamples(struct pipe_screen *screen, DXGI_FORMAT Format, unsigned samples, bool *known)
++{
++   *known = false;
++   if (SbIsDepthFormat(Format)) {
++      enum pipe_format depth = FormatTranslate(Format, true);
++      if (depth == PIPE_FORMAT_NONE || !util_format_is_depth_or_stencil(depth) ||
++          !screen->is_format_supported(screen, depth, PIPE_TEXTURE_2D, 0, 0, PIPE_BIND_DEPTH_STENCIL))
++         return false;
++      *known = true;
++      return screen->is_format_supported(screen, depth, PIPE_TEXTURE_2D, samples, samples, PIPE_BIND_DEPTH_STENCIL);
++   }
++   /* creation only (CheckFormatSupport): not a render target */
++   if (Format == DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM)
++      return false;
++   enum pipe_format color = FormatTranslate(Format, false);
++   if (color == PIPE_FORMAT_NONE || util_format_is_depth_or_stencil(color) ||
++       !screen->is_format_supported(screen, color, PIPE_TEXTURE_2D, 0, 0, PIPE_BIND_RENDER_TARGET))
++      return false;
++   *known = true;
++   return screen->is_format_supported(screen, color, PIPE_TEXTURE_2D, samples, samples, PIPE_BIND_RENDER_TARGET);
++}
++
++/* The family's answer for a sample count above 1. */
++static bool
++SbFamilyMultisample(struct pipe_screen *screen, DXGI_FORMAT Format, unsigned samples)
++{
++   const DXGI_FORMAT family = SbFormatFamily(Format);
++   bool any = false, known;
++
++   if (!SbFormatTargetSamples(screen, family, samples, &known) && known)
++      return false;
++   any |= known;
++   if (SbFormatFamily(family) == family && family <= DXGI_FORMAT_B8G8R8X8_UNORM_SRGB) {
++      for (unsigned m = 1; m <= (unsigned)DXGI_FORMAT_B8G8R8X8_UNORM_SRGB; m++) {
++         if ((DXGI_FORMAT)m == family || SbFormatFamily((DXGI_FORMAT)m) != family)
++            continue;
++         if (!SbFormatTargetSamples(screen, (DXGI_FORMAT)m, samples, &known) && known)
++            return false;
++         any |= known;
++      }
++   }
++   return any;
++}
++
+ void APIENTRY
+ CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
+                    DXGI_FORMAT Format,       // IN
+@@ -631,31 +783,34 @@ CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
+       return;
+    }
+ 
++#if SUPPORT_MSAA
++   /* the family's answer (see SbFormatFamily): any sample count the levels are asked for */
++   const bool sbMsaa = SbMsaaOn() &&
++                       (SbFamilyMultisample(screen, Format, 4) || SbFamilyMultisample(screen, Format, 8) ||
++                        SbFamilyMultisample(screen, Format, 16) || SbFamilyMultisample(screen, Format, 2));
++#else
++   const bool sbMsaa = false;
++#endif
++
+    if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 0, 0,
+                                    PIPE_BIND_RENDER_TARGET)) {
+       *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_RENDERTARGET;
+       *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_BLENDABLE;
+ 
+-#if SUPPORT_MSAA
+-      if (SbMsaaOn() &&
+-          screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 4, 4,
+-                                      PIPE_BIND_RENDER_TARGET)) {
++      if (sbMsaa)
+          *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
+-      }
+-#endif
++   } else if (sbMsaa && (SbIsDepthFormat(Format) || Format == DXGI_FORMAT_R32G8X24_TYPELESS ||
++                         Format == DXGI_FORMAT_R24G8_TYPELESS)) {
++      /* a multisampled depth buffer, and the typeless format it is created with (T82 pass M) */
++      *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
+    }
+ 
+    if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 0, 0,
+                                    PIPE_BIND_SAMPLER_VIEW)) {
+       *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_SHADER_SAMPLE;
+ 
+-#if SUPPORT_MSAA
+-      if (SbMsaaOn() &&
+-          screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 4, 4,
+-                                      PIPE_BIND_RENDER_TARGET)) {
++      if (sbMsaa && (*pFormatCaps & D3D10_DDI_FORMAT_SUPPORT_RENDERTARGET))
+          *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_LOAD;
+-      }
+-#endif
+    }
+ }
+ 
+@@ -693,16 +848,13 @@ CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,        // IN
+    }
+    if (!SbMsaaOn())
+       return;
+-   enum pipe_format color = FormatTranslate(Format, false), depth = FormatTranslate(Format, true);
+-   if ((color != PIPE_FORMAT_NONE && !util_format_is_depth_or_stencil(color) &&
+-        screen->is_format_supported(screen, color, PIPE_TEXTURE_2D, SampleCount, SampleCount,
+-                                    PIPE_BIND_RENDER_TARGET)) ||
+-       (depth != PIPE_FORMAT_NONE && util_format_is_depth_or_stencil(depth) &&
+-        screen->is_format_supported(screen, depth, PIPE_TEXTURE_2D, SampleCount, SampleCount,
+-                                    PIPE_BIND_DEPTH_STENCIL)))
++   /* one answer for the whole family, the same from each of its members (see SbFormatFamily) */
++   if (FormatTranslate(Format, false) != PIPE_FORMAT_NONE && SbFamilyMultisample(screen, Format, SampleCount))
+       *pNumQualityLevels = 1;
++   /* every answer of the first walk over the formats (about 100 formats, four counts): the place where the
++    * runtime stops is the finding, and at 24 lines T82 did not show it */
+    static unsigned said;
+-   if (said < 24) {
++   if (said < 640) {
+       said++;
+       DebugPrintf("sbumd: CheckMultisampleQualityLevels %s x%u: %u\n", FormatToName(Format), SampleCount,
+                   *pNumQualityLevels);
+-- 
+2.43.0
+
+From feb4e175fec7fddaabf6f748de095f8ef4074185 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 18:47:35 +0200
+Subject: [PATCH 5/8] panfrost, d3d10umd: a Direct3D depth bias is in steps of
+ the depth buffer, not doubled
+
+T82, every pass on our driver: test_depth_bias fails 437 of 40106 checks,
+all of them the DepthBias part with D24_UNORM_S8_UINT and D16_UNORM, and in
+every one the depth read back is the expected value with twice the bias
+(checked for all 437 lines: clamp(2 * bias) reproduces what was read; the
+D32_FLOAT cases pass).
+
+Panfrost multiplies offset_units by two for a fixed-point depth buffer (its
+minimum resolvable difference; GL leaves that to the implementation).
+Direct3D 10 defines the unit as one step of the buffer, which is what the
+hardware unit turns out to be. pipe_rasterizer_state gets
+sb_offset_units_exact; d3d10umd sets it, Panfrost then passes the units on
+unscaled. Other frontends keep the factor.
+
+Compiled only.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/gallium/drivers/panfrost/pan_cmdstream.c  | 16 +++++++++++++---
+ src/gallium/frontends/d3d10umd/Rasterizer.cpp |  3 +++
+ src/gallium/include/pipe/p_state.h            |  9 +++++++++
+ 3 files changed, 25 insertions(+), 3 deletions(-)
+
+diff --git a/src/gallium/drivers/panfrost/pan_cmdstream.c b/src/gallium/drivers/panfrost/pan_cmdstream.c
+index 5a7e542..b2b14c6 100644
+--- a/src/gallium/drivers/panfrost/pan_cmdstream.c
++++ b/src/gallium/drivers/panfrost/pan_cmdstream.c
+@@ -444,14 +444,24 @@ panfrost_emit_compute_shader_meta(struct panfrost_batch *batch,
+ }
+ 
+ static float
+-panfrost_z_depth_offset(struct panfrost_context *ctx, float offset_units)
++panfrost_z_depth_offset(struct panfrost_context *ctx,
++                        const struct pipe_rasterizer_state *rast)
+ {
++   float offset_units = rast->offset_units;
++
+    if (ctx->pipe_framebuffer.zsbuf.texture) {
+       if (util_format_is_float(ctx->pipe_framebuffer.zsbuf.format)) {
+          /* no scaling necessary, hw will do this at run time */
+          return offset_units;
+       }
+    }
++   /* Starbite: Direct3D's unit is one step of the depth buffer, and that is
++    * what the hardware's unit is: d3d10core test_depth_bias (T82) read back
++    * exactly twice the bias from D24 and D16 buffers, in all of its 437
++    * failures and nowhere else.
++    */
++   if (rast->sb_offset_units_exact)
++      return offset_units;
+    /* if fixed point, apply the minimum resolvable difference scaling here */
+    return 2.0f * offset_units;
+ }
+@@ -604,7 +614,7 @@ panfrost_prepare_fs_state(struct panfrost_context *ctx, uint64_t *blend_shaders,
+ #endif
+ 
+       cfg.stencil_mask_misc.alpha_to_coverage = alpha_to_coverage;
+-      cfg.depth_units = panfrost_z_depth_offset(ctx, rast->offset_units);
++      cfg.depth_units = panfrost_z_depth_offset(ctx, rast);
+       cfg.depth_factor = rast->offset_scale;
+       cfg.depth_bias_clamp = rast->offset_clamp;
+ 
+@@ -890,7 +900,7 @@ panfrost_emit_depth_stencil(struct panfrost_batch *batch)
+       cfg.depth_source = pan_depth_source(&fs->info);
+ 
+       cfg.depth_bias_enable = rast->base.offset_tri;
+-      cfg.depth_units = panfrost_z_depth_offset(ctx, rast->base.offset_units);
++      cfg.depth_units = panfrost_z_depth_offset(ctx, &rast->base);
+       cfg.depth_factor = rast->base.offset_scale;
+       cfg.depth_bias_clamp = rast->base.offset_clamp;
+ 
+diff --git a/src/gallium/frontends/d3d10umd/Rasterizer.cpp b/src/gallium/frontends/d3d10umd/Rasterizer.cpp
+index 4a4504c..500adbd 100644
+--- a/src/gallium/frontends/d3d10umd/Rasterizer.cpp
++++ b/src/gallium/frontends/d3d10umd/Rasterizer.cpp
+@@ -232,6 +232,9 @@ CreateRasterizerState(
+    state.scissor = (pRasterizerDesc->ScissorEnable ? 1 : 0);
+    state.line_smooth = (pRasterizerDesc->AntialiasedLineEnable ? 1 : 0);
+    state.offset_units = (float)pRasterizerDesc->DepthBias;
++   /* Direct3D 10: DepthBias counts steps of a fixed-point depth buffer (bias = DepthBias * 2^-n). Panfrost
++    * doubles the units otherwise (its minimum resolvable difference for GL): test_depth_bias, T82. */
++   state.sb_offset_units_exact = 1;
+    state.offset_scale = pRasterizerDesc->SlopeScaledDepthBias;
+    state.offset_clamp = pRasterizerDesc->DepthBiasClamp;
+    /* sb-patches/0173: the values alone switch nothing on. Gallium applies the bias to polygons per fill mode
+diff --git a/src/gallium/include/pipe/p_state.h b/src/gallium/include/pipe/p_state.h
+index 2ae8e40..f0d56a0 100644
+--- a/src/gallium/include/pipe/p_state.h
++++ b/src/gallium/include/pipe/p_state.h
+@@ -192,6 +192,15 @@ struct pipe_rasterizer_state
+     */
+    unsigned offset_units_unscaled:1;
+ 
++   /**
++    * Starbite: one offset unit is exactly one step of a fixed-point depth
++    * buffer (Direct3D 10: bias = DepthBias * 2^-n). A driver that scales the
++    * units by a larger minimum resolvable difference of its own (Panfrost:
++    * two steps, which GL allows) does not do so when this is set. Float
++    * depth buffers are not affected.
++    */
++   unsigned sb_offset_units_exact:1;
++
+    /**
+     * Depth values output from fragment shader may be outside 0..1.
+     * These have to be clamped for use with UNORM buffers.
+-- 
+2.43.0
+
+From ea9a44a6a5b2725fdcff80bb35b1115c240fd82f Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 18:49:09 +0200
+Subject: [PATCH 6/8] d3d10umd: a render target view of a buffer is created
+ empty instead of removing the device
+
+T82 pass N, d3d11 test_create_rendertarget_view: CreateRenderTargetView on a
+buffer (D3D11_RTV_DIMENSION_BUFFER, legal) returns DXGI_ERROR_DEVICE_REMOVED
+and the test then crashes on the view it did not get. The driver answered
+SetError(E_NOTIMPL) ("Render target view into buffer!"), which the runtime
+treats as the loss of the device. It also left the view object as the
+runtime allocated it, which DestroyRenderTargetView then dropped a reference
+through, and kept one reference to the buffer for good.
+
+No gallium driver here renders into a buffer, so the view is created with no
+surface: bound, it is an empty render target slot; clearing it does nothing;
+what is drawn into it is lost (one log line says so). The unknown-dimension
+branches of both view creations leave a clean object the same way.
+
+Compiled only.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ .../frontends/d3d10umd/OutputMerger.cpp       | 25 +++++++++++++++++--
+ 1 file changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/frontends/d3d10umd/OutputMerger.cpp b/src/gallium/frontends/d3d10umd/OutputMerger.cpp
+index b435303..3306259 100644
+--- a/src/gallium/frontends/d3d10umd/OutputMerger.cpp
++++ b/src/gallium/frontends/d3d10umd/OutputMerger.cpp
+@@ -95,8 +95,20 @@ CreateRenderTargetView(
+ 
+    switch (pCreateRenderTargetView->ResourceDimension) {
+    case D3D10DDIRESOURCE_BUFFER:
+-      LOG_UNSUPPORTED("Render target view into buffer!");
+-      SetError(hDevice, E_NOTIMPL);
++      /* A render target view of a buffer is legal Direct3D, and no gallium driver here draws into a buffer.
++       * The answer used to be SetError(E_NOTIMPL), which the runtime takes as the loss of the device
++       * (d3d11 test_create_rendertarget_view, T82 pass N: DXGI_ERROR_DEVICE_REMOVED from the creation, then the
++       * test's crash), with the view's memory left as the runtime handed it, for DestroyRenderTargetView to
++       * drop a reference through, and one reference to the buffer never returned. The view is now created
++       * without a surface: bound, it is an empty render target slot (SetRenderTargets), and a clear of it does
++       * nothing. What is drawn into it is lost. */
++      {
++         static unsigned said;
++         if (said++ < 4)
++            DebugPrintf("sbumd: render target view of a buffer: created, draws into it are dropped\n");
++      }
++      pipe_resource_reference(&desc.texture, NULL);
++      memset(&pRTView->surface, 0, sizeof pRTView->surface);
+       return;
+    case D3D10DDIRESOURCE_TEXTURE1D:
+       ASSERT(pCreateRenderTargetView->Tex1D.ArraySize != (UINT)-1);
+@@ -127,6 +139,9 @@ CreateRenderTargetView(
+       break;
+    default:
+       ASSERT(0);
++      /* as for a buffer: a view with nothing behind it, not runtime memory with a reference in it */
++      pipe_resource_reference(&desc.texture, NULL);
++      memset(&pRTView->surface, 0, sizeof pRTView->surface);
+       return;
+    }
+ 
+@@ -180,6 +195,10 @@ ClearRenderTargetView(D3D10DDI_HDEVICE hDevice,                      // IN
+    struct pipe_surface *surface = CastPipeRenderTargetView(hRenderTargetView);
+    union pipe_color_union clear_color;
+ 
++   /* the view of a buffer (CreateRenderTargetView) has nothing behind it */
++   if (!surface || !surface->texture)
++      return;
++
+    sbTrace.clears++;
+    sbTrace.clear_tex = surface ? surface->texture : NULL;
+    sbTrace.last_clear_rgba = (unsigned)(pColorRGBA[0] * 255.0f + 0.5f) |
+@@ -322,6 +341,8 @@ CreateDepthStencilView(
+       break;
+    default:
+       ASSERT(0);
++      pipe_resource_reference(&desc.texture, NULL);
++      memset(&pDSView->surface, 0, sizeof pDSView->surface);
+       return;
+    }
+ 
+-- 
+2.43.0
+
+From e92ebbf244d46156f65aa33694df4439d8a464ac Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 18:51:44 +0200
+Subject: [PATCH 7/8] panfrost: the stream output and geometry capture vertex
+ variants follow the integer vertex elements
+
+T82 pass N, d3d11 test_vertex_id: the stream output of a vertex shader whose
+input is an R32_UINT element holds 0x3f800000, 0x40000000, ... where the ids
+1, 2, ... are expected: the element converted to float.
+
+A vertex shader variant is keyed on which vertex elements are pure integers
+(sb_retype_int_attribs loads those raw). The two variants kept outside the
+variant list were not: the transform feedback one (vs->xfb) is compiled when
+the shader is created and the geometry capture one (vs->gs_capture, gsemu)
+at its first draw, both for "no integer element". They are now compiled
+again when the elements bound at a draw differ from the ones they were made
+for (panfrost_sb_special_vs_variant). For that the transform feedback key
+alone has to select the transform feedback lowering, since the shader it is
+made from has had has_transform_feedback_varyings cleared by then.
+
+The other failures of the test (indexed draws captured only through the
+geometry path) are not touched. Compiled only.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/gallium/drivers/panfrost/pan_cmdstream.c |  4 ++
+ src/gallium/drivers/panfrost/pan_context.h   |  4 ++
+ src/gallium/drivers/panfrost/pan_shader.c    | 45 ++++++++++++++++++++
+ 3 files changed, 53 insertions(+)
+
+diff --git a/src/gallium/drivers/panfrost/pan_cmdstream.c b/src/gallium/drivers/panfrost/pan_cmdstream.c
+index b2b14c6..088f17a 100644
+--- a/src/gallium/drivers/panfrost/pan_cmdstream.c
++++ b/src/gallium/drivers/panfrost/pan_cmdstream.c
+@@ -3523,6 +3523,10 @@ panfrost_launch_xfb(struct panfrost_batch *batch,
+ 
+    perf_debug(batch->ctx, "Emulating transform feedback");
+ 
++   /* Starbite: made for the vertex elements of this draw (integer ones are
++    * read raw) */
++   panfrost_sb_special_vs_variant(ctx, vs_uncompiled, vs_uncompiled->xfb);
++
+    vs_uncompiled->xfb->stream_output = vs->stream_output;
+ 
+    uint64_t saved_rsd = batch->rsd[MESA_SHADER_VERTEX];
+diff --git a/src/gallium/drivers/panfrost/pan_context.h b/src/gallium/drivers/panfrost/pan_context.h
+index c20ff62..dc5c797 100644
+--- a/src/gallium/drivers/panfrost/pan_context.h
++++ b/src/gallium/drivers/panfrost/pan_context.h
+@@ -769,6 +769,10 @@ struct panfrost_compiled_shader *
+ panfrost_get_gs_capture(struct panfrost_context *ctx,
+                         struct panfrost_uncompiled_shader *vs);
+ 
++void panfrost_sb_special_vs_variant(struct panfrost_context *ctx,
++                                    struct panfrost_uncompiled_shader *vs,
++                                    struct panfrost_compiled_shader *variant);
++
+ static inline void
+ panfrost_dirty_state_all(struct panfrost_context *ctx)
+ {
+diff --git a/src/gallium/drivers/panfrost/pan_shader.c b/src/gallium/drivers/panfrost/pan_shader.c
+index 293358a..20c9021 100644
+--- a/src/gallium/drivers/panfrost/pan_shader.c
++++ b/src/gallium/drivers/panfrost/pan_shader.c
+@@ -131,6 +131,14 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
+ 
+    nir_shader *s = nir_shader_clone(NULL, ir);
+ 
++   /* Starbite: the transform feedback variant is made again when the vertex
++    * elements change (panfrost_sb_special_vs_variant), by which time the
++    * shader it is made from no longer says it has transform feedback
++    * (panfrost_create_shader_state clears that once the variant exists).
++    */
++   if (s->info.stage == MESA_SHADER_VERTEX && key->vs.is_xfb)
++      s->info.has_transform_feedback_varyings = true;
++
+    if (s->info.stage == MESA_SHADER_VERTEX && key->vs.int_attribs)
+       NIR_PASS(_, s, nir_shader_intrinsics_pass, sb_retype_int_attribs, nir_metadata_all, &key->vs.int_attribs);
+ 
+@@ -879,13 +887,50 @@ panfrost_get_gs_capture(struct panfrost_context *ctx,
+    if (!vs->gs_capture) {
+       vs->gs_capture = calloc(1, sizeof(struct panfrost_compiled_shader));
+       vs->gs_capture->key.vs.gs_capture = true;
++      vs->gs_capture->key.vs.int_attribs = ctx->sb_int_attribs;
+ 
+       panfrost_shader_get(ctx->base.screen, &ctx->shaders, &ctx->descs, vs,
+                           &ctx->base.debug, vs->gs_capture, 0);
+    }
++   panfrost_sb_special_vs_variant(ctx, vs, vs->gs_capture);
+    return vs->gs_capture;
+ }
+ 
++/*
++ * Starbite: the two vertex shader variants that are kept outside the variant
++ * list (the transform feedback one, vs->xfb, and the one that runs ahead of
++ * a geometry shader, vs->gs_capture) read the vertex elements like any other
++ * and so depend on which of them are pure integers (sb_retype_int_attribs),
++ * but were compiled once, for no integer element: an R32_UINT attribute
++ * reached stream output converted to float (d3d11 test_vertex_id, T82: 1.0f
++ * captured where the id 1 was expected). The variant is compiled again when
++ * the elements bound for this draw differ from the ones it was made for.
++ * Batches that used the old code hold their own references to it.
++ */
++void
++panfrost_sb_special_vs_variant(struct panfrost_context *ctx,
++                               struct panfrost_uncompiled_shader *vs,
++                               struct panfrost_compiled_shader *variant)
++{
++   if (!variant || variant->key.vs.int_attribs == ctx->sb_int_attribs)
++      return;
++
++   const bool is_xfb = variant->key.vs.is_xfb;
++   const bool gs_capture = variant->key.vs.gs_capture;
++
++   panfrost_bo_unreference(variant->bin.bo);
++   panfrost_bo_unreference(variant->state.bo);
++   panfrost_bo_unreference(variant->linkage.bo);
++
++   memset(variant, 0, sizeof(*variant));
++   variant->key.vs.is_xfb = is_xfb;
++   variant->key.vs.gs_capture = gs_capture;
++   variant->key.vs.int_attribs = ctx->sb_int_attribs;
++
++   panfrost_shader_get(ctx->base.screen, &ctx->shaders, &ctx->descs, vs,
++                       &ctx->base.debug, variant, 0);
++}
++
+ /* What poly made of a geometry shader, as the state objects a draw uses. */
+ static struct panfrost_gs *
+ panfrost_gs_from_nir(struct pipe_context *pctx, nir_shader *nir,
+-- 
+2.43.0
+
+From ea8a080763c2c0aadcd0c9fc556a890dfef02663 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 18:57:20 +0200
+Subject: [PATCH 8/8] gallium/util: the draws made without primitive restart do
+ not claim index bounds they do not have
+
+T82 pass G (gsemu), d3d10core test_index_buffer_offset: three draws of four
+points with the index buffer bound at byte offsets 0, 16 and 32. The first
+captures the right vertices, the other two capture (0, 0, 0, 1) for every
+attribute.
+
+Direct3D always has the restart index on, and Panfrost sends an indexed
+draw with a geometry shader through util_draw_vbo_without_prim_restart.
+That function stored what util_prim_restart_convert_to_direct returns as
+min_index / max_index in the draw info and set index_bounds_valid; but the
+helper computes the first and last position read in the index buffer
+(add_range: start, start + count - 1), not the smallest and largest index.
+Panfrost goes by valid bounds: for the draws at offsets 16 and 32 (start 4
+and 8) it shaded vertices 4..7 and 8..11 of a buffer of four. With start 0
+and indices that are a permutation of 0..n-1 the two happen to agree.
+
+The bounds are no longer stored or declared valid; bounds the caller gave
+are kept. Only the geometry path of Panfrost calls this function here.
+
+Host: the harness runs the function against a recording draw_vbo
+(--selftest, "restart-free draws"): 2 of 15 checks failed before, 0 now.
+On the phone: not run.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/gallium/auxiliary/util/u_prim_restart.c   |  16 ++-
+ .../d3d10umd/tests/dxbc_nir_harness.c         | 112 ++++++++++++++++++
+ 2 files changed, 126 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/auxiliary/util/u_prim_restart.c b/src/gallium/auxiliary/util/u_prim_restart.c
+index 07164cc..cff3ee5 100644
+--- a/src/gallium/auxiliary/util/u_prim_restart.c
++++ b/src/gallium/auxiliary/util/u_prim_restart.c
+@@ -263,15 +263,27 @@ util_draw_vbo_without_prim_restart(struct pipe_context *context,
+    }
+ 
+    unsigned total_index_count;
++   /* Starbite: what the helper returns as "min_index" and "max_index" are the
++    * first and last position in the index buffer that the draws read
++    * (add_range: start, start + count - 1), not the smallest and largest
++    * index. They were stored in the draw info as its index bounds and
++    * declared valid; a driver that goes by the bounds (Panfrost) then shaded
++    * the vertices numbered like the positions. With the index buffer bound
++    * at offset 0 and indices that are a permutation of their positions that
++    * is the same range, otherwise not: d3d10core test_index_buffer_offset
++    * (T82 pass G, the draws at index buffer offsets 16 and 32 read vertices
++    * 4..7 and 8..11 of a buffer of four). The caller's bounds, if it gave
++    * any, stay as they are; they cover every piece.
++    */
++   unsigned first_position, last_position;
+    direct_draws = util_prim_restart_convert_to_direct(src_map, &new_info, &new_draw, &num_draws,
+-                                                      &new_info.min_index, &new_info.max_index,
++                                                      &first_position, &last_position,
+                                                       &total_index_count);
+    /* unmap index buffer */
+    if (src_transfer)
+       pipe_buffer_unmap(context, src_transfer);
+ 
+    new_info.primitive_restart = false;
+-   new_info.index_bounds_valid = true;
+    if (direct_draws)
+       context->draw_vbo(context, &new_info, drawid_offset, NULL, direct_draws, num_draws);
+    free(direct_draws);
+diff --git a/src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness.c b/src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness.c
+index 6afdd16..79b50cf 100644
+--- a/src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness.c
++++ b/src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness.c
+@@ -44,7 +44,10 @@
+ #include "dxbc_nir_harness.h"
+ 
+ #include "nir/tgsi_to_nir.h"
++#include "pipe/p_context.h"
+ #include "pipe/p_screen.h"
++#include "util/u_draw.h"
++#include "util/u_prim_restart.h"
+ #include "tgsi/tgsi_dump.h"
+ #include "tgsi/tgsi_ureg.h"
+ 
+@@ -1547,6 +1550,111 @@ so_bookkeeping_selftest(void)
+ 
+ #endif /* HAVE_PANFROST_COMPILER */
+ 
++/*
++ * util_draw_vbo_without_prim_restart, which the driver's geometry path
++ * sends every indexed draw through (Direct3D always has the restart index
++ * on): the pieces it hands to draw_vbo must not carry index bounds that are
++ * positions in the index buffer (T82 pass G, test_index_buffer_offset).
++ */
++static struct {
++   unsigned calls, draws;
++   struct pipe_draw_start_count_bias draw[8];
++   bool bounds_valid;
++   unsigned min_index, max_index;
++   bool restart;
++} restart_seen;
++
++static void
++restart_selftest_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
++                          unsigned drawid_offset, const struct pipe_draw_indirect_info *indirect,
++                          const struct pipe_draw_start_count_bias *draws, unsigned num_draws)
++{
++   restart_seen.calls++;
++   restart_seen.bounds_valid = info->index_bounds_valid;
++   restart_seen.min_index = info->min_index;
++   restart_seen.max_index = info->max_index;
++   restart_seen.restart = info->primitive_restart;
++   for (unsigned i = 0; i < num_draws && restart_seen.draws < ARRAY_SIZE(restart_seen.draw); i++)
++      restart_seen.draw[restart_seen.draws++] = draws[i];
++}
++
++static unsigned
++restart_draw_selftest(void)
++{
++   /* as test_index_buffer_offset: three draws of four points, the index
++    * buffer bound at 0, 16 and 32 bytes */
++   static const uint32_t indices[] = {
++      3, 2, 1, 0,
++      1, 3, 2, 0,
++      1, 0xffffffff, 2, 0,
++   };
++   struct pipe_context pipe;
++   unsigned checks = 0, failed = 0;
++
++   memset(&pipe, 0, sizeof pipe);
++   pipe.draw_vbo = restart_selftest_draw_vbo;
++
++#define RESTART_CHECK(cond, what)                                              \
++   do {                                                                        \
++      checks++;                                                                \
++      if (!(cond)) {                                                           \
++         failed++;                                                             \
++         printf("restart-free draws: FAILED: %s\n", what);                     \
++      }                                                                        \
++   } while (0)
++
++   for (unsigned n = 0; n < 3; n++) {
++      struct pipe_draw_info info;
++      struct pipe_draw_start_count_bias draw = { .start = 4 * n, .count = 4 };
++      unsigned lowest = ~0u, highest = 0;
++
++      util_draw_init_info(&info);
++      info.mode = MESA_PRIM_POINTS;
++      info.index_size = 4;
++      info.has_user_indices = true;
++      info.index.user = indices;
++      info.primitive_restart = true;
++      info.restart_index = 0xffffffff;
++
++      memset(&restart_seen, 0, sizeof restart_seen);
++      util_draw_vbo_without_prim_restart(&pipe, &info, 0, NULL, &draw);
++
++      for (unsigned i = 0; i < restart_seen.draws; i++) {
++         for (unsigned j = 0; j < restart_seen.draw[i].count; j++) {
++            uint32_t index = indices[restart_seen.draw[i].start + j];
++
++            lowest = MIN2(lowest, index);
++            highest = MAX2(highest, index);
++         }
++      }
++
++      RESTART_CHECK(restart_seen.calls == 1 && !restart_seen.restart, "one draw call, restart off");
++      RESTART_CHECK(restart_seen.draws == (n == 2 ? 2 : 1), "the pieces between the restart indices");
++      RESTART_CHECK(restart_seen.draws && restart_seen.draw[0].start == 4 * n,
++                    "the first piece starts where the draw does");
++      /* what the draw reads, without the restart index */
++      unsigned want_lowest = ~0u, want_highest = 0;
++
++      for (unsigned j = 0; j < draw.count; j++) {
++         uint32_t index = indices[draw.start + j];
++
++         if (index != info.restart_index) {
++            want_lowest = MIN2(want_lowest, index);
++            want_highest = MAX2(want_highest, index);
++         }
++      }
++      RESTART_CHECK(lowest == want_lowest && highest == want_highest,
++                    "the pieces hold the indices of the draw");
++      RESTART_CHECK(!restart_seen.bounds_valid ||
++                    (restart_seen.min_index <= lowest && restart_seen.max_index >= highest),
++                    "index bounds, if declared valid, bound the index values (not positions in the buffer)");
++   }
++#undef RESTART_CHECK
++
++   printf("restart-free draws: %u checks, %u failed\n", checks, failed);
++   return failed;
++}
++
+ 
+ /*
+  * One shader
+@@ -2255,6 +2363,10 @@ main(int argc, char **argv)
+       so_bookkeeping_selftest();
+       tessellator_selftest();
+    }
++#endif
++   if (so_selftest)
++      restart_draw_selftest();
++#ifdef HAVE_PANFROST_COMPILER
+    if (opt.compile && !opt.tgsi)
+       print_tess_pairs();
+ #endif
+-- 
+2.43.0
+
