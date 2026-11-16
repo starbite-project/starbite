@@ -3109,6 +3109,23 @@ wait 1.5 ms). **0168** (src-tc da5173f, `sb-patches/0168-wgl-zero-copy-present-t
   GPU, Edge with its GPU process unsandboxed (so sbumd logs there), Edge as normal; sbsmooth before and after; the
   whole State key saved at the end.
 
+### 6.105 T77 produced nothing: the new tree's driver crashes DWM and LogonUI at boot
+
+(2026-11-16 06:10) **T77** (`build/win/results-t77`, sbumd b59839d2 = sb-nir d4cb682, no flag files at boot): the boot never
+reached the logon. WER: 3 x `dwm.exe` and 3 x `LogonUI.exe`, c0000374 (heap corruption) and one c0000005 in ntdll's
+heap. No sbumd log was written for either process, so the fault is before the shim's first line: at DLL load, in
+`OpenAdapter` / `GetSupportedVersions`, or in `CreateDevice` before the bind. The watchdog ended the boot at 3600 s
+and no conformance pass ran (the `sbwt-*.log.out` folders in that pull are T74's and T76b's).
+- So "with no flag file the tree behaves as before" was wrong for this build, and neither the offline harness,
+  the sanitizer runs nor the review could see it: none of them executes the Windows-only frontend or the DLL.
+- Known good on the phone from that branch: only 98e9e6a6 (cf67267, T76b), which loaded and created devices (and
+  was then refused by the runtime over its MSAA answers). The regression is in cf67267..d4cb682.
+- A first read of what runs before the first log line (the version list, `CreateDevice` up to the bind, the DLL's
+  imports, which are identical to the working builds) found nothing. DWM's crash dumps are on the phone
+  (`C:\sbdumps`, armed in T70) and come with T79's user-pull.
+- **Process change:** a driver build from a tree that has never booted gets a short boot-and-logon check first
+  (a few minutes, one small test), before any long test is queued on it. T77 cost an hour of phone time for nothing.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
