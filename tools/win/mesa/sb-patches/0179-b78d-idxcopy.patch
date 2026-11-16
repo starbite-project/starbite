@@ -1,0 +1,88 @@
+From 88becea9a1f7bdc2d1d1d1920279ca0398b27705 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 21:19:29 +0200
+Subject: [PATCH] b78d: switch idxcopy: an indexed draw reads a private copy of
+ its indices, range computed from that copy (T91: newbo did not stop the tiler
+ hang)
+
+---
+ src/gallium/drivers/panfrost/pan_helpers.c | 56 ++++++++++++++++++++++
+ 1 file changed, 56 insertions(+)
+
+diff --git a/src/gallium/drivers/panfrost/pan_helpers.c b/src/gallium/drivers/panfrost/pan_helpers.c
+index 99012fd..958bfef 100644
+--- a/src/gallium/drivers/panfrost/pan_helpers.c
++++ b/src/gallium/drivers/panfrost/pan_helpers.c
+@@ -106,6 +106,32 @@ panfrost_get_index_buffer(struct panfrost_batch *batch,
+  * these operations together because there are natural optimizations which
+  * require them to be together. */
+ 
++#ifdef _WIN32
++/* b78d (T91: the tiler hang survives "never reuse a discarded buffer"), flag file C:\\ProgramData\\Starbite\\idxcopy:
++ * an indexed draw from an index BUFFER gets a private copy of its indices in the batch's own memory, taken now, and
++ * its index range is computed from that copy. The tiler then reads exactly the indices the job was built for,
++ * whatever happens to the application's buffer afterwards. If the DWM timeouts stop with it, the indices were
++ * changing (or stale in the min/max cache) between the draw call and the job; if not, indices are cleared. */
++__declspec(dllimport) unsigned long __stdcall GetFileAttributesA(const char *lpFileName);
++static bool
++sb_idxcopy(void)
++{
++   static int v = -1;
++   if (v < 0) {
++      v = GetFileAttributesA("C:\\ProgramData\\Starbite\\idxcopy") != 0xFFFFFFFFul;
++      if (v)
++         fprintf(stderr, "sbumd: b78d switch idxcopy: indexed draws read a private copy of their indices\n");
++   }
++   return v;
++}
++#else
++static bool
++sb_idxcopy(void)
++{
++   return false;
++}
++#endif
++
+ uint64_t
+ panfrost_get_index_buffer_bounded(struct panfrost_batch *batch,
+                                   const struct pipe_draw_info *info,
+@@ -116,6 +142,36 @@ panfrost_get_index_buffer_bounded(struct panfrost_batch *batch,
+    struct panfrost_context *ctx = batch->ctx;
+    bool needs_indices = true;
+ 
++   if (!info->has_user_indices && !info->index_bounds_valid && draw->count && rsrc && rsrc->bo &&
++       rsrc->bo->ptr.cpu && sb_idxcopy()) {
++      size_t bytes = (size_t)draw->count * info->index_size;
++      off_t off = (off_t)draw->start * info->index_size;
++      struct pan_ptr T = pan_pool_alloc_aligned(&batch->pool.base, bytes, info->index_size);
++      if (T.cpu) {
++         unsigned lo = ~0u, hi = 0;
++         const unsigned restart = info->primitive_restart ? info->restart_index : ~0u;
++         memcpy(T.cpu, (const uint8_t *)rsrc->bo->ptr.cpu + off, bytes);
++         for (unsigned i = 0; i < draw->count; i++) {
++            unsigned v = info->index_size == 1   ? ((const uint8_t *)T.cpu)[i]
++                         : info->index_size == 2 ? ((const uint16_t *)T.cpu)[i]
++                                                 : ((const uint32_t *)T.cpu)[i];
++            if (info->primitive_restart &&
++                v == (info->index_size == 1 ? (restart & 0xff) : info->index_size == 2 ? (restart & 0xffff) : restart))
++               continue;
++            if (v < lo)
++               lo = v;
++            if (v > hi)
++               hi = v;
++         }
++         if (lo > hi)
++            lo = hi = 0;                   /* nothing but restart indices */
++         *min_index = lo;
++         *max_index = hi;
++         panfrost_batch_read_rsrc(batch, rsrc, MESA_SHADER_VERTEX);   /* still named: residency as before */
++         return T.gpu;
++      }
++   }
++
+    /* Note: if index_bounds_valid is set but the bounds are wrong, page faults
+     * (at least on Mali-G52) can be triggered an underflow reading varyings.
+     * Providing invalid index bounds in GLES is implementation-defined
+-- 
+2.43.0
+

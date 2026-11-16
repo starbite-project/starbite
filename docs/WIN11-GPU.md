@@ -3669,6 +3669,26 @@ three test programs, T61's D3D driver set; measured. `GLSYS VERDICT: PASS`.)
 - Not tested: the plain `win11` row (no watchdog, cannot run unattended); it reads whatever S-Boot left in the
   watchdog register, which is not 80 s.
 
+### 6.124 Chain results, part 11: T91 `newbo`, the lead of 6.118 is refuted; `idxcopy` staged (T92)
+
+(2026-11-16 21:19; `build/win/results-t91-newbo`: sbumd b78c with the flag `newbo` (its line is in DWM's log), diagnostic KMD;
+measured.)
+
+- **No change:** Calculator 2 / 11 / 23, kept open up to 87, 113 after closing; the Calculator shot 100 % black.
+  With a whole-buffer DISCARD map never reusing a BO in place, the tiler still hangs. So the stall is **not** a
+  dynamic buffer rewritten in place after a DISCARD (6.118's lead, in the form `newbo` tests). The `seqfix` change
+  is still correct code (a wait must not read its number before sending the held chain) but it is not this bug.
+- Also checked by reading, and found in order: Panfrost's min/max index cache is invalidated on every write map
+  (d3d10umd maps the whole buffer, so the whole cache goes); the adapter's memory segment is not cache-coherent
+  and VidMm maps CPU views write-combined, so a CPU write is in memory before the submit (only allocations with
+  `MW_ALLOC_CPU_CACHED`, the GL kit's back buffers, are cached, with explicit cache operations).
+- **Next split, sbumd b78d** (`sb-b78`, `sb-patches/0179`): flag file `idxcopy`: an indexed draw from an index
+  buffer gets a private copy of its indices in the batch's memory at draw time, and its vertex range is computed
+  from that copy. **T92** (`sbwddm-t92`): the same test with `idxcopy`. Timeouts gone = the indices the tiler read
+  were not the ones the job was built for; unchanged = indices cleared, and what is left is the positions the
+  vertex stage hands the tiler (then: dump them).
+- Still worth running: `nomerge` and `seqfix` on `sbwddm-t91`, and `nirdump` (which also runs on the t92 build).
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
