@@ -224,7 +224,7 @@ static struct {
     int fs_tol, fs_vmid_sum, fs_vmid_cnt, fs_vmid, fs_load_w10, fs_chip_w10;
     /* MAX (continuous), fs_ov 3: no length, no cooldown, instant re-arm; a summary each second; the boost's target
      * walked up while the load is not at the chip's limit (more volts only help a load above ~3.4 ohm) */
-    int fs_vb_code, fs_vb_base, fs_lowv_ticks;
+    int fs_vb_code, fs_vb_base, fs_lowv_ticks, fs_open;
     unsigned fs_trips_win;
     uint8_t fs_d2_start;
     uint8_t cnfg11;
@@ -316,7 +316,6 @@ static void fs_pulse_begin(void);
 static void fs_keep(const char *line);
 static void fs_pulse_end(void);
 static void fs_tick(uint64_t now);
-static void fs_max_walk(int code);
 static void fs_max_second(void);
 
 /* 1.2-alpha29: OTG_ILIM (CNFG_02) only takes a write with CHGPROT unlocked (CNFG_06 bits 3:2 = 0b11; Samsung's
@@ -535,9 +534,7 @@ static int usb_start(int fire)
         }
         sb_log(r.b);
     }
-    if (fire == 2 && U.fs_ov == 3)          /* MAX: the walk starts at the chip's own target */
-        U.fs_vbyp = -1;
-    if (fire == 2 && U.fs_ov >= 2) {        /* S9 #2's override: a higher boost target */
+    if (fire == 2 && U.fs_ov == 2) {        /* S9 #2's override: a higher boost target (measured: no effect in OTG) */
         uint8_t c11 = 0;
         if (!chg_rd(R_CNFG11, &c11)) {
             usb_back();
@@ -584,6 +581,7 @@ static int usb_start(int fire)
         U.fs_sag = 0;
         U.fs_lowv_ticks = 0;
         U.fs_trips_win = 0;
+        U.fs_open = 0;
         uint8_t d2 = 0;
         U.fs_d2_start = chg_rd(R_DTLS2, &d2) ? d2 : 0;
         fs_pulse_begin();
@@ -712,6 +710,11 @@ static void fs_pulse_end(void)
     U.fs_load_w10 = U.fs_avg > 0 && U.fs_vmid > 0 ? (int)((int64_t)U.fs_avg * U.fs_vmid / 100000) : 0;
     U.fs_chip_w10 = U.fs_w10 > U.fs_load_w10 ? U.fs_w10 - U.fs_load_w10 : 0;
     U.fs_vmin = U.fs_vmin_cur == 99 ? -1 : U.fs_vmin_cur;
+    /* fs-max1: the notched lead broke after its second pulse and MAX ran on into nothing: under 50 mA for a whole
+     * window with the output on = the load is open (a broken lead, a loose wire) */
+    U.fs_open = U.fs_cnt >= 10 && U.fs_avg >= 0 && U.fs_avg < 50;
+    if (U.fs_open)
+        sb_log("survival: fs: LOAD OPEN: under 50 mA with the output on (a broken lead or a loose wire)");
     U.fs_sag = U.fs_sag_cur == 99999 ? 0 : U.fs_sag_cur;
     ++U.fs_n;
     struct ub u;
@@ -881,24 +884,6 @@ static int fs_rearm(const char *what)
     if (!chg_wr(R_CNFG00, U.cnfg00))
         return 0;
     return chg_wr(R_CNFG00, (uint8_t)((U.cnfg00 & ~0x0fU) | MODE_OTG));
-}
-
-/* MAX: the boost's target up 2 codes while the port is about 5 V or more with no limit event since the last step
- * and VBYP below 6.3 V; down 2 (not below the chip's own) after a limit event or above 6.3 V */
-static void fs_max_walk(int code)
-{
-    int up = U.trips == U.fs_trips_win && code >= 2 && U.fs_vb_last > 0 && U.fs_vb_last < 6300;
-    int down = (U.trips != U.fs_trips_win || U.fs_vb_last > 6300) && U.fs_vb_code > U.fs_vb_base;
-    U.fs_trips_win = U.trips;
-    int want = up ? U.fs_vb_code + 2 : down ? U.fs_vb_code - 2 : U.fs_vb_code;
-    if (want > 0x7f)
-        want = 0x7f;
-    if (want < U.fs_vb_base)
-        want = U.fs_vb_base;
-    if (want == U.fs_vb_code)
-        return;
-    if (chg_wr(R_CNFG11, (uint8_t)((U.cnfg11 & 0x80U) | (unsigned)want)))
-        U.fs_vb_code = want;
 }
 
 /* MAX: one short line a second into the log and the kept blob */
@@ -1126,8 +1111,8 @@ static void fs_tick(uint64_t now)
         ub_s(&u, " dC");
         sb_log(u.b);
     }
-    if (U.fs_ov == 3 && now - U.t_fs_log < 20U)   /* MAX: the boost's walk, four times a second (after the trace) */
-        fs_max_walk(code);
+    /* MAX's boost walk is off: fs-max1 (11-16) measured VBYPSET ignored in OTG mode (VBYP 5027 mV at codes 0x08..0x54);
+     * the walk was removed (git: 1be40b8c) */
     if (!U.fs_pulse_ms && in >= 1000U) {    /* MAX: a summary each second, the output stays on */
         U.fs_on_ms += in;
         fs_pulse_end();
@@ -1367,6 +1352,7 @@ void surv_usb_status(struct surv_usb *s)
     s->fs_load_w10 = U.fs_load_w10;
     s->fs_rearms = (int32_t)U.fs_rearms;
     s->fs_vb_code = U.fs_vb_code;
+    s->fs_open = U.fs_open;
     s->fs_elapsed_ms = U.state == SURV_USB_ON && U.fire == 2 ? (int32_t)(now - U.t_on) : 0;
     s->fs_chip_w10 = U.fs_chip_w10;
     if (U.state == SURV_USB_ON && U.fire == 2) {   /* the time left of this pulse, or of the rest before the next */

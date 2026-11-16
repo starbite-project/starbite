@@ -314,8 +314,7 @@ static void show_compass(void)
 /* ---- 1.2-alpha30: Fire starter. One fixed layout (the same elements in the same order in every state), so the
  * 5-a-second redraw never moves the hold under the finger. ---- */
 static int fs_pulse = 1, fs_rep, fs_lim = 2, fs_armed;     /* 1 s, single, 1.5 A; the arming switch (this visit) */
-static int fs_ov, fs_vb = 1, fs_wool;      /* fs_wool: the steel-wool preset (3 s, single, 1.5 A, no override) */
-static const int fs_vb_code[4] = { 5, 10, 25, 50 };
+static int fs_ov, fs_wool;      /* fs_wool: the steel-wool preset (3 s, single, 1.5 A, no override) */
 
 static const char *fs_why_text(int why, uint32_t *c)
 {
@@ -350,8 +349,10 @@ static void show_fire(void)
     ui_title("Fire starter");
     fmt_init(&f);
     int live = setting_get(SET_SURV_FS_LIVE);
-    int rearms = live & 0x3fff, secs = (live >> 14) & 0x3ff, vbc = (live >> 24) & 0x7f;
-    if (st == 1 && out && fs_ov == 3 && !fs_wool) {
+    int rearms = live & 0x3fff, secs = (live >> 14) & 0x3ff, vbc = (live >> 24) & 0x3f, open = (live >> 30) & 1;
+    if (st == 1 && out && open) {
+        ui_big("NOTHING IS DRAWING POWER", "LOAD OPEN: check the lead", ORANGE);
+    } else if (st == 1 && out && fs_ov == 3 && !fs_wool) {
         fmt_s(&f, "MAX ");
         fmt_d(&f, secs);
         fmt_s(&f, " s");
@@ -462,9 +463,9 @@ static void show_fire(void)
     ui_textline("Current limit (the charger chip's own steps; 1.5 A is its top, it trips near 1.6 A)", GREY);
     ui_level(52, "0.9 A|1.2 A|1.5 A", fs_lim);
     ui_textline("Override (test phone S9 #2 only; pulses 1 s at most; risks the charger chip)", ORANGE);
-    ui_level(55, "Off|Re-arm|Re-arm+V|MAX", fs_ov);
-    ui_textline("Boost voltage code (VBYPSET; 0 = 5.0 V, the step is being measured)", GREY);
-    ui_level(56, "5|10|25|50", fs_vb);
+    ui_level(55, "Off|Re-arm|MAX", fs_ov == 3 ? 2 : fs_ov ? 1 : 0);
+    ui_textline("The ceiling: about 5.0 V x 1.5 A = 7 W (measured: the boost voltage cannot be raised in this mode).",
+                GREY);
     ui_textline("Keys: Volume Up / Down move, Power short selects (Arm, the choices), hold Power 1 s to fire: it fires "
                 "while Power stays down. Bixby held = back.", 0xffffffffU);
     ui_textline("Wire: 0.5 mm pencil lead, each bare wire wrapped 3-4 tight turns round it, 5-7 cm apart to start. "
@@ -561,7 +562,7 @@ void app_event(const struct sbos_event *ev)
                 (void)setting_set(SET_SURV_FS, 3 | 3 << 8 | 1 << 12 | 1 << 13);
             else
                 (void)setting_set(SET_SURV_FS, fs_pulse | (fs_rep ? 1 : 0) << 4 | (fs_lim + 1) << 8 | 1 << 12 |
-                                               fs_ov << 16 | (fs_ov == 2 ? fs_vb_code[fs_vb] : 0) << 20);
+                                               fs_ov << 16);
         } else if (page == P_LIGHT && ev->id == 12 && setting_set(SET_SURV_WHISTLE, 1) == 0) {
             whistle_k = 1;
             timer_set(3, 1000, 0);
@@ -635,12 +636,9 @@ void app_event(const struct sbos_event *ev)
         break;
     }
     case EV_APP_LEVEL:
-        if (ev->id == 55 || ev->id == 56) {
+        if (ev->id == 55) {
             int v = (int)ev->value;
-            if (ev->id == 55)
-                fs_ov = v < 0 ? 0 : v > 3 ? 3 : v;
-            else
-                fs_vb = v < 0 ? 0 : v > 3 ? 3 : v;
+            fs_ov = v <= 0 ? 0 : v == 1 ? 1 : 3;   /* Off / Re-arm / MAX */
         } else if (ev->id >= 50 && ev->id <= 52) {
             int v = (int)ev->value;
             if (ev->id == 50)

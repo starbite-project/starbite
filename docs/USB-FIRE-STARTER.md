@@ -77,7 +77,31 @@ every hold and before any restart. Self-test images refuse to fire.
   lead's ohm/cm, so the gap length does not help; a thinned spot (half the thickness over 5 mm: 2-4x the local
   ohm/cm, less mass) does. A long enough lead (>= 3.5 ohm, ~9-10 cm) runs within spec with no limiting.
 
-(more runs: the ATORCH USB tester's V / A, the notched lead, steel wool)
+**Run 2 (build 30d, notched 0.5 mm lead):** the ATORCH USB tester could not show anything (it needs a few seconds to
+start and could not hold the load); the user smelled the lead's binder but saw no smoke; the lead was "a little warm".
+
+**Run 3, MAX (build 30f, notched lead; pmsg `build/survival/fs-max1-pmsg.txt`):**
+- **VBYPSET is ignored in OTG mode:** CNFG_11 codes 0x08..0x54 all read back, and the gauge's VBYP stayed 5027 mV
+  every second. The boost's output in OTG is fixed at ~5.0 V. Override 2 and MAX's voltage walk are removed (30g).
+- **The best pulse so far:** the 2nd second, port band 3 (~5 V and up), mean 954 mA, peak 1529 mA, only 3 limit events:
+  a load of about 5 ohm taking **~5.7 W** (5.6 W from the cell, nothing lost in the chip's switch). Then the load
+  went open (14-74 mA for the remaining 10 s): the lead broke at its notch, or a wrap came loose.
+- No temperature anywhere near a stop (battery 28 C, connector 27 C, charger 31 C).
+- The "crash" after the run was the forced key restart (rst 0x00010000) used to reach fastboot, not Starbite OS.
+
+### The measured ceiling
+
+| | value | source |
+|---|---|---|
+| port voltage while under the limit | ~5.0 V (VBYP 5027 mV), not adjustable in OTG | fs-max1 |
+| current limit | 1.5 A step, trips at ~1.53 A (peak 1529 mA seen) | fs-max1, run 1 |
+| most power into a load | **~7 W** in theory (5.0 V x 1.5 A at ~3.4 ohm); **5.7 W measured** at ~5 ohm | fs-max1 |
+| a load under ~3.3 ohm | pinned at ~1.45 A, the port below 3.5 V, the cell's ~10 W mostly burned in the chip's switch | run 1 |
+
+Best loads for that ~7 W: **fine steel wool (0000)**, a few strands stretched between the wires (lights at once);
+an intact thin lead (0.3 mm, or 0.5 mm H/2H) firmly clamped, about 3.5-5 ohm, with the tinder pressed onto its middle;
+a notch only lightly (it burns through in a second, as run 3 showed).
+
 
 ## 4. Controls without touch, and the touch fix
 

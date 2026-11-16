@@ -52,7 +52,7 @@ struct surv_usb {
     int32_t fs_why;             /* SURV_FS_WHY_*: why the last hold ended (or was refused) */
     int32_t fs_vbyp_mv, fs_cellw10;
     int32_t fs_load_w10, fs_chip_w10;
-    int32_t fs_rearms, fs_vb_code, fs_elapsed_ms;   /* MAX: re-arms in this hold, the boost's code, the time on */ /* the last pulse: 0.1 W into the load (mA x the port band's middle), in the chip */ /* the last pulse: the boost's mean output (the gauge's VBYP); 0.1 W from the cell */
+    int32_t fs_rearms, fs_vb_code, fs_elapsed_ms, fs_open;   /* MAX: re-arms in this hold, the boost's code, the time on */ /* the last pulse: 0.1 W into the load (mA x the port band's middle), in the chip */ /* the last pulse: the boost's mean output (the gauge's VBYP); 0.1 W from the cell */
 };
 /* after the UI's hold-to-arm: start one burst. 0 started, < 0 refused (why in the status) */
 int surv_usb_start(void);
