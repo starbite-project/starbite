@@ -1,0 +1,117 @@
+From 60427751c24b4b1eff32210761fbd0aa11343a8c Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 19:22:18 +0200
+Subject: [PATCH] b78c: three experiment switches for the T87 tiler hang:
+ seqfix (a held-back chain is sent before a wait reads the number to wait
+ for), newbo (a DISCARD map of a buffer always takes a new BO), nomerge (flag
+ file for SB_NO_MERGE)
+
+---
+ include/win32-compat/malikm_drm.c           | 17 +++++++++++--
+ src/gallium/drivers/panfrost/pan_resource.c | 27 +++++++++++++++++++++
+ 2 files changed, 42 insertions(+), 2 deletions(-)
+
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index c6c336f..30d64f2 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -903,7 +903,8 @@ struct sbdev {
+    uint32_t pend_n, pend_out_sync, pend_bo_n, pend_bo_cap;
+    uint32_t *pend_bos;
+    unsigned st_merged;
+-   int no_merge;           /* SB_NO_MERGE=1 */
++   int no_merge;           /* SB_NO_MERGE=1, or the flag file nomerge (b78c) */
++   int seqfix;             /* b78c, flag file seqfix: a held-back chain is sent BEFORE a wait reads what to wait for */
+    /* b78 (docs/WIN11-GPU.md 6.104, T78: DWM job timeouts): the KMD's failure counters as last seen by this device,
+     * what the last allocation list held, and how often a list was full before every BO that wanted in was in it */
+    uint32_t k_timeouts, k_failed, k_resets, k_seen;
+@@ -1785,6 +1786,8 @@ wdead_reap(struct sbdev *d)
+ static int
+ wddm_idle(struct sbdev *d)
+ {
++   if (d->seqfix && d->pend)
++      (void)sb_flush_pend(d);             /* b78c: d->seq below must include the held chain */
+    int ret = sb_wait_seq(d, d->seq, 10000);
+ 
+    if (ret == 0 && trace_on()) {
+@@ -1921,7 +1924,10 @@ malikm_bind_d3dddi(HANDLE hRTAdapter, HANDLE hRTDevice, const void *pKTCallbacks
+       const char *la = getenv("SB_LIST_ALL");
+       d->list_all = (la && *la == '1') || malikm_switch("listall");   /* b78: flag file; SB_LIST_ALL never reaches DWM */
+       const char *nm = getenv("SB_NO_MERGE");
+-      d->no_merge = nm && *nm == '1';   /* T30: SB_NO_MERGE=1, every chain its own Render */
++      d->no_merge = (nm && *nm == '1') || malikm_switch("nomerge");   /* T30: every chain its own Render */
++      d->seqfix = malikm_switch("seqfix");
++      if (d->no_merge || d->seqfix)
++         fprintf(stderr, "sbumd: b78c switches: nomerge %d, seqfix %d\n", d->no_merge, d->seqfix);
+       sb_read_flags(d, "its creation");
+       d->last_state = 1;
+       D3DDDICB_CREATECONTEXT c = {0};
+@@ -2149,6 +2155,11 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+       struct wbo *bo = wddm_bo(d, a->handle);
+       if (!bo)
+          return -MK_ENOENT;
++      /* b78c (seqfix): sb_wait_seq sends a held-back chain itself, but only after bo->used was read here: for a BO
++       * that only the held chain names, the wait then asked about an older submission and answered "idle". Mesa
++       * takes that answer to reuse a dynamic buffer in place (DISCARD) or to hand the BO out again. */
++      if (d->seqfix && d->pend)
++         (void)sb_flush_pend(d);
+       return sb_wait_seq(d, bo->used, sb_timeout_ms(a->timeout_ns));
+    }
+    case MALIKM_NR_PANFROST_SUBMIT: {
+@@ -2371,6 +2382,8 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+       struct drm_syncobj_wait *a = (void *)b;
+       const uint32_t *hs = (const uint32_t *)(b + a->handles);
+       uint64_t want = 0, least = UINT64_MAX;
++      if (d->seqfix && d->pend)
++         (void)sb_flush_pend(d);          /* b78c: the held chain's sync object gets its number only now */
+       for (uint32_t i = 0; i < a->count_handles; i++) {
+          uint64_t *s = sb_sync(d, hs[i]);
+          uint64_t v = s ? *s : d->seq;
+diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
+index 0ec7f97..488a5f2 100644
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -1598,6 +1598,32 @@ pan_ptr_map_fail(struct panfrost_transfer *transfer, struct pipe_transfer **out_
+    return NULL;
+ }
+ 
++
++#ifdef _WIN32
++/* b78c, flag file C:\\ProgramData\\Starbite\\newbo: a whole-buffer DISCARD map never reuses the buffer's BO in place,
++ * whatever the "is it idle?" query says. If the DWM job timeouts (T87) stop with it, a dynamic vertex or index buffer
++ * was being rewritten under a job that still read it. */
++__declspec(dllimport) unsigned long __stdcall GetFileAttributesA(const char *lpFileName);
++static bool
++sb_always_new_bo(const struct pipe_resource *r)
++{
++   static int v = -1;
++   if (v < 0) {
++      v = GetFileAttributesA("C:\\ProgramData\\Starbite\\newbo") != 0xFFFFFFFFul;
++      if (v)
++         fprintf(stderr, "sbumd: b78c switch newbo: a DISCARD map of a buffer always takes a new BO\n");
++   }
++   return v && r->target == PIPE_BUFFER;
++}
++#else
++static bool
++sb_always_new_bo(const struct pipe_resource *r)
++{
++   (void)r;
++   return false;
++}
++#endif
++
+ static void *
+ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
+                  unsigned level,
+@@ -1735,6 +1761,7 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
+        * batches), we try to allocate a new one to avoid waiting.
+        */
+       if (panfrost_any_batch_reads_rsrc(ctx, rsrc) ||
++          sb_always_new_bo(resource) ||
+           !panfrost_bo_wait(bo, 0, true)) {
+          /* We want the BO to be MMAPed. */
+          uint32_t flags = bo->flags & ~PAN_BO_DELAY_MMAP;
+-- 
+2.43.0
+

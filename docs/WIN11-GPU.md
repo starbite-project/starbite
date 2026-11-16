@@ -3478,6 +3478,8 @@ Linux host; the Win32 file code is **compiled only**.)
 
 ### 6.116 Chain results, part 3: T87 pins the stall on one compositor vertex shader that does not finish
 
+> **Corrected by 6.118:** T87n shows the vertex shader finishes; the stuck stage is the tiler. "One shader" below is true of the draws, not of the cause.
+
 (2026-11-16 18:54; `build/win/results-t87s`, `build/win/results-t87`; measured with the diagnostic KMD be555bb4 and sbumd b78.)
 
 - **T87s, PASS:** the diagnostic pair boots (blt 49.6 fps, flip 58.8 fps, 12/12, counters 0).
@@ -3532,6 +3534,41 @@ Linux host; the Win32 file code is **compiled only**.)
   everyday Windows, not only of the new builds.
 - Caveat: T87c ran T61's sbumd on the diagnostic KMD, not on the user's d85e0d3a. The KMD difference is the hang
   records only (and `VtTimeoutMs` at its default).
+
+### 6.118 Chain results, part 5: T87n, it is the tiler, not the vertex shader; a lead in our own wait code; three switches staged
+
+(2026-11-16 19:22; `build/win/results-t87n`: sbumd b78 with the flag `noidvs`, diagnostic KMD; measured. The lead and the
+switches are from reading; not run.)
+
+- **T87n:** with IDVS off the storm is the same (Calculator: 9 after 12 s, 20 when closed; kept open: up to 83, 93
+  after closing; 0 from every other step), but every hang record now says **`job tiler`** with its dependency (the
+  separate vertex job of the same draw) already done: `tiler idx 34 dep 33/32`. So the vertex shader ran to its
+  end. **6.116's reading (the shader does not finish) is wrong.** What sticks is the tiler: the stage that reads
+  the index buffer and the shaded positions and bins the triangles. With IDVS that work is inside the
+  indexed-vertex job, which is why that job hung there.
+- **What can make a tiler never finish with all memory present:** its input. Either the positions it is handed are
+  bad, or the indices do not belong to the vertex range the job was built for (the job carries a base vertex
+  offset = minus the smallest index the driver found when the draw was issued; an index outside that range makes
+  the tiler read "positions" from memory that is not this draw's).
+- **A lead in our own code (read, not shown to be the cause):** DWM streams XAML geometry through dynamic vertex
+  and index buffers (the hung draw's base vertex offset is negative and different every time; the index pointer
+  walks through a buffer and jumps to a new one every few frames). When such a buffer is mapped with DISCARD,
+  Panfrost asks the shim whether its BO is idle and, if so, lets the app overwrite it in place. The shim's
+  `WAIT_BO` reads the number of the submission that last named the BO **before** `sb_wait_seq` sends a
+  held-back vertex/tiler chain (T30's merge) and gives that chain's BOs their number; `wddm_idle` and
+  `SYNCOBJ_WAIT` have the same order. For a BO that only a held chain names, the answer is then "idle". If that
+  can happen in DWM (it needs a wait between a held vertex/tiler chain and its fragment chain: another thread on
+  the device, or a fragment submit that failed), the app rewrites indices or vertices under a queued job.
+  I could not show from the code that the window is reachable in DWM's single render thread, so this is a lead,
+  with the general pattern (a buffer reused in place while a job still reads it) as the thing to test.
+- **sbumd b78c** (`sb-b78` 6042775, `sb-patches/0178`, ba4fbe2e; includes the shader dump of b78b), three flag files,
+  each read once per process:
+  - `newbo`: a whole-buffer DISCARD map never reuses the BO in place. If the timeouts stop, a dynamic buffer was
+    rewritten under a job (whatever said "idle");
+  - `nomerge`: no vertex/tiler chain is held back (every chain its own Render);
+  - `seqfix`: the held chain is sent before a wait reads what to wait for (the three places above).
+- **T91** (`sbwddm-t91`, diagnostic KMD + b78c, `sb-apps3.bat`): three runs, one flag each. Read: the Calculator
+  steps' timeout counts against T87's (22 and 100).
 
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 

@@ -21,7 +21,7 @@ set PAGE=file:///C:/starbite/auto/gpu/sb-web.html
 set LASTT=0
 cd /d %D%
 echo APPS3 start %date% %time% >> %L%
-for %%F in (noidvs nirshaders listall noafbc b78nowait gsemu msaa d3d11ddi) do if exist C:\ProgramData\Starbite\%%F echo APPS3 flag file %%F is present >> %L%
+for %%F in (noidvs nirshaders listall noafbc b78nowait gsemu msaa d3d11ddi newbo nomerge seqfix nirdump) do if exist C:\ProgramData\Starbite\%%F echo APPS3 flag file %%F is present >> %L%
 ping -n 31 127.0.0.1 > nul
 call :clocks start
 taskkill /f /im msedge.exe > nul 2>&1
