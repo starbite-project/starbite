@@ -3046,6 +3046,31 @@ this phone, so the tests themselves are sound here.
   the new runner, seven passes: O (no flags), N (nirshaders), G (+gsemu), M (+msaa: is the device accepted now?),
   D (+d3d11ddi), F (+fl11), X (dxgi).
 
+### 6.102 T78 staged (APPS1): everyday apps on the candidate driver
+
+(2026-11-16 02:24) `build/win/stage/sbwddm-t78` = the candidate for the user (sbumd 0167) + `sb-apps.bat`: Edge on a
+local animated page (`sb-web.html`: CSS animation, 2D canvas, WebGL; its window title carries the page's fps and the
+WebGL renderer string), Settings, Calculator, Notepad, Paint, a File Explorer window and Task Manager, one at a
+time: 25 s each, a shot, an alive check, the window title; then sbsmooth and sbdrag on this driver (against T72),
+the crash events and `tasklist /svc`. It answers: do browsers and WinUI apps start and show on 0167 (Edge aborts
+on the user's driver, 6.98), and does the candidate keep the desktop's pace.
+
+### 6.103 GD ICD 0168: the zero-copy present on a thread of its own; T79 staged
+
+(2026-11-16 02:24) T71's flip path leaves ~7.5 ms of waits per frame on the game thread (GL wait 5.6 ms, the copy's
+wait 1.5 ms). **0168** (src-tc da5173f, `sb-patches/0168-wgl-zero-copy-present-thread.patch`, ARM64EC
+`build/win/gd-zc-0168`: opengl32 d17d12ef, libgallium_wgl 8588f8ca), flag file `glzcasync`:
+- the game thread, at SwapBuffers, waits until the frame before is completely through (shown, and its copy has
+  read its texture, which is what frees the other texture), queues an event behind the frame it just flushed
+  (`malikm_kmt_frame_mark`: SignalSynchronizationObject2 with a CPU event, no wait under the device lock; the old
+  `malikm_kmt_frame_wait` held that lock for the whole wait, which would have stopped the game's own submits), hands
+  the frame over and goes on drawing into the other texture;
+- the present thread waits for the event, copies into the swap chain buffer, presents, and waits for the copy.
+- A frame then costs max(game, present side) instead of their sum. A resize or a destroy drains the thread first;
+  three failed presents in a row still switch the window to GDI. Not run yet.
+- **T79** (`build/win/stage/sbwddm-t79`, candidate drivers, `sb-gdruns.bat` + `sb-gd-runs.txt`): B (`glzcflipd`),
+  C (`glzcflipd glzcasync`), B2, C2.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
