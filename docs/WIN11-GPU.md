@@ -2998,7 +2998,7 @@ two minutes. **74 pass, 17 fail, 20 crash, 0 time out.**
 
 ### 6.100 T71 read: the flip model works for every window kind; Geometry Dash shows 60 on it (GDI: 32-41)
 
-(2026-11-16 02:10) **T71** (`build/win/results-t71`, big cores, sbumd d39b83ab = 0167, no flag files for part 1):
+(2026-11-16 02:04) **T71** (`build/win/results-t71`, big cores, sbumd d39b83ab = 0167, no flag files for part 1):
 - **FLIP2, one DWM process (pid 1108) for the whole boot:** hwnd (FLIP_SEQUENTIAL) 60.2 fps, hwndblt (DISCARD)
   52.8, **dcsc (DirectComposition swap chain) 61.3, dcsurf (DirectComposition surface) 55.5**, 0 failures each.
   With the user's sbumd none of the four was composed (T56-T60); with 0159 alone the flip kinds killed DWM (T66).
