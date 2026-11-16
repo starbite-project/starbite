@@ -796,36 +796,44 @@ static void usb_tap(float x, float y)
     }
 }
 
-/* ---- Survival Heat (9j: kern/heater.c through sh_heat_*) -----------------------------------------------------------
- * Off: the levels as rows (a tap starts it; the kernel asks first: its first use, Keep warm, Survival's three holds),
- * the duration for Low / Medium / High, the last stop's or refusal's words. Running: the time, the temperatures, the
- * battery, a big Stop. Polled at 1 Hz while it runs, and for 20 s after a tap (a confirmation answered meanwhile) */
-#define HT_ROW (CONTENT_TOP + 8)        /* the levels' group (4 rows) */
-#define HT_SEG (HT_ROW + 4 * 47 + 16)   /* the duration */
-#define HT_SURV (HT_SEG + 36 + 54)      /* Survival Heat's own group (1 row) */
-#define HT_TXT (HT_SURV + 47 + 12)      /* its words, then the last stop's */
-static const char *const HT_L[4] = { "Low", "Medium", "High", "Keep the battery warm" };
-static const char *const HT_V[4] = { "Warm hands", "Warmer", "Hot", "In deep cold" };
-static const int HT_LV[4] = { SH_HEAT_LOW, SH_HEAT_MEDIUM, SH_HEAT_HIGH, SH_HEAT_KEEPWARM };
+static void fs_seg(dc *d, float y, const char *const *L, int n, int sel, int red);
+/* ---- Survival Heat (9j, 9k: kern/heater.c through sh_heat_*) ------------------------------------------------------
+ * Off: the levels as rows (a tap starts it; the kernel asks first: its first use, Extreme's, Keep warm's, Survival's
+ * three holds or four with the trip off), the duration for Low / Medium / High, Survival's group (start; All out,
+ * Unlimited and the hardware trip off as switches; the battery limit: the kernel asks for each the classic way), the
+ * last stop's or refusal's words. Running: the time, the temperatures, the battery, a big Stop. Polled at 1 Hz while it
+ * runs, and for 20 s after a tap (a confirmation answered meanwhile). Manual (clocks picked per cluster) stays classic */
+#define HT_NL 5
+#define HT_ROW (CONTENT_TOP + 8)        /* the levels' group */
+#define HT_SEG (HT_ROW + HT_NL * 47 + 12)   /* the duration */
+#define HT_SURV (HT_SEG + 36 + 40)      /* Survival Heat's group: start, All out, Unlimited, trip off */
+#define HT_BAT (HT_SURV + 4 * 47 + 12)  /* its battery limit (caption, the segments under it) */
+#define HT_TXT (HT_BAT + 20 + 36 + 10)  /* the last stop's words */
+static const char *const HT_L[HT_NL] = { "Low", "Medium", "High", "Extreme", "Keep the battery warm" };
+static const char *const HT_V[HT_NL] = { "Warm hands", "Warmer", "Hot", "Everything flat out", "In deep cold" };
+static const int HT_LV[HT_NL] = { SH_HEAT_LOW, SH_HEAT_MEDIUM, SH_HEAT_HIGH, SH_HEAT_EXTREME, SH_HEAT_KEEPWARM };
 static const char *const HT_D[3] = { "15 min", "30 min", "1 hour" };
 static const int HT_DM[3] = { 15, 30, 60 };
+static const char *const HT_B[4] = { "55 \xc2\xb0" "C", "58 \xc2\xb0" "C", "60 \xc2\xb0" "C", "65 \xc2\xb0" "C" };
+static const int HT_BC[4] = { 550, 580, 600, 650 };
 static int ht_running(const sh_heat_t *h) { return h->state == SH_HEAT_RUNNING || h->state == SH_HEAT_HOLDING || h->state == SH_HEAT_PAUSED; }
+static int ht_tripoff(void) { return sh_pref_int("heat.tripoff", 0) == 1; }   /* Next's own (classic keeps its app state) */
+static void ht_row(dc *d, float y, const char *l, const char *v, tk_col lc, int rule)
+{
+    d_text(d, TK_IT400, 16, ROW_TX, y + 13 + 16, l, 0, 0, lc, 0);
+    if (v) { float w = tw(TK_IT400, 15, v, 0, 0); d_text(d, TK_IT400, 15, CONTENT_R - 16 - w, y + 13 + 16, v, 0, 0, W(.5f), 0); }
+    if (rule) SV_RULE(d, y + 46);
+}
 static void page_heat(dc *d)
 {
     d_h1(d, "Survival Heat");
     d_text(d, TK_IT400, 13, MARGIN, LARGE_BASE + 20, "Heat from the processors \xc2\xb7 it stops by itself", 0, 0, W(.55f), 0);
     if (SV.heat_on) {                   /* running: the live layer and the Stop draw over the ground */
-        d_rrect(d, GROUP_X, HT_ROW, GROUP_W, 278, 16, SVC(SV_GROUP));
+        d_rrect(d, GROUP_X, HT_ROW, GROUP_W, 300, 16, SVC(SV_GROUP));
         return;
     }
-    d_rrect(d, GROUP_X, HT_ROW, GROUP_W, 4 * 47 - 1, 16, SVC(SV_GROUP));
-    for (int i = 0; i < 4; i++) {
-        float y = HT_ROW + 47 * i;
-        d_text(d, TK_IT400, 16, ROW_TX, y + 13 + 16, HT_L[i], 0, 0, INK, 0);
-        float w = tw(TK_IT400, 15, HT_V[i], 0, 0);
-        d_text(d, TK_IT400, 15, CONTENT_R - 16 - w, y + 13 + 16, HT_V[i], 0, 0, W(.5f), 0);
-        if (i < 3) SV_RULE(d, y + 46);
-    }
+    d_rrect(d, GROUP_X, HT_ROW, GROUP_W, HT_NL * 47 - 1, 16, SVC(SV_GROUP));
+    for (int i = 0; i < HT_NL; i++) ht_row(d, HT_ROW + 47 * i, HT_L[i], HT_V[i], i == 3 ? SVC(SV_TINT) : INK, i < HT_NL - 1);
     d_rrect(d, GROUP_X, HT_SEG, GROUP_W, 36, 10, W(.1f));
     float sw = (GROUP_W - 4) / 3;
     d_rrect(d, GROUP_X + 2 + sw * SV.heat_dur, HT_SEG + 2, sw, 32, 8, tk_hex(0x5a3a3c, 1));
@@ -834,9 +842,24 @@ static void page_heat(dc *d)
         d_text(d, TK_IT600, 13, GROUP_X + 2 + sw * i + (sw - tx) / 2, bl(TK_IT600, 13, HT_SEG + 9.5f), HT_D[i], 0, 0, i == SV.heat_dur ? INK : W(.65f), 0);
     }
     d_text(d, TK_IT400, 13, ROW_TX, HT_SEG + 36 + 20, "How long Low, Medium and High run", 0, 0, W(.45f), 0);
-    d_rrect(d, GROUP_X, HT_SURV, GROUP_W, 46, 16, SVC(SV_GROUP));
+    d_rrect(d, GROUP_X, HT_SURV, GROUP_W, 4 * 47 - 1, 16, SVC(SV_GROUP));
     d_text(d, TK_IT600, 16, ROW_TX, HT_SURV + 13 + 16, "Survival Heat", 0, 0, SVC(SV_RED), 0);
     { float w = tw(TK_IT400, 15, "Last resort", 0, 0); d_text(d, TK_IT400, 15, CONTENT_R - 16 - w, HT_SURV + 13 + 16, "Last resort", 0, 0, W(.5f), 0); }
+    SV_RULE(d, HT_SURV + 46);
+    sv_switch_row(d, HT_SURV + 47, "All out (no hold, no throttle)", 0);
+    sv_switch_row(d, HT_SURV + 94, "Unlimited (every limit off)", 0);
+    sv_switch_row(d, HT_SURV + 141, "Hardware trip off", 1);
+    d_text(d, TK_IT400, 13, ROW_TX, HT_BAT + 13, "Survival stops at this battery temperature", 0, 0, W(.45f), 0);
+    int bi = 0;
+    for (int i = 0; i < 4; i++) if (HT_BC[i] == sh_heat_opt(SH_HO_BAT_C10)) bi = i;
+    fs_seg(d, HT_BAT + 20, HT_B, 4, bi, bi == 3);
+}
+static void heat_switches(void)
+{
+    if (SV.heat_on) return;
+    sv_switch(SVL_A, HT_SURV + 47, sh_heat_opt(SH_HO_ALL_OUT));
+    sv_switch(SVL_B, HT_SURV + 94, sh_heat_opt(SH_HO_UNLIMITED));
+    sv_switch(SVL_FLD, HT_SURV + 141, ht_tripoff() || sh_heat_opt(SH_HO_UNLIMITED));   /* (Unlimited switches the trip off too) */
 }
 static void heat_text(void)
 {
@@ -855,20 +878,22 @@ static void heat_text(void)
         b[n++] = ':'; n = sv_2(b, n, s % 60);
         float w = tw(TK_IT700, 64, b, 0, TK_TNUM);
         d_text(&d, TK_IT700, 64, 195 - w / 2, bl(TK_IT700, 64, HT_ROW + 16), b, 0, TK_TNUM, INK, 0);
-        static const char *const LV[9] = { "", "Low", "Medium", "High", "", "", "Keeping the battery warm", "Survival Heat", "Survival Heat" };
+        static const char *const LV[9] = { "", "Low", "Medium", "High", "Extreme", "Manual", "Keeping the battery warm", "Survival Heat",
+                                           "Survival Heat, trip off" };
         n = sv_cat(b, 0, h->level >= 0 && h->level < 9 ? LV[h->level] : "");
         n = sv_cat(b, n, h->state == SH_HEAT_HOLDING ? " \xc2\xb7 holding (warm enough)" : h->state == SH_HEAT_PAUSED ? " \xc2\xb7 paused (a charger)" :
                          h->secs_left > 0 ? " \xc2\xb7 time left" : " \xc2\xb7 running");
-        sv_centre(&d, TK_IT600, 16, HT_ROW + 96, b, h->level >= SH_HEAT_SURVIVAL ? SVC(SV_RED) : INK);
+        sv_centre(&d, TK_IT600, 16, HT_ROW + 96, b, h->level >= SH_HEAT_EXTREME && h->level != SH_HEAT_KEEPWARM ? SVC(SV_RED) : INK);
         float y = HT_ROW + 136;
         static const char *const TL[3] = { "Battery", "Back of the phone", "Processor" };
         int tv[3] = { h->bat_c10, h->skin_c10, h->soc_c10 };
+        int lim = h->level >= SH_HEAT_SURVIVAL ? h->surv_bat_c10 : h->level == SH_HEAT_EXTREME || h->level == SH_HEAT_KEEPWARM ? 550 : 420;
         for (int i = 0; i < 3; i++, y += 30) {
             d_text(&d, TK_IT400, 16, ROW_TX, y, TL[i], 0, 0, W(.75f), 0);
             if (tv[i] <= -1000) n = sv_cat(b, 0, "\xe2\x80\x94");
             else { n = sv_dec(b, 0, tv[i], 1); n = sv_cat(b, n, " \xc2\xb0" "C"); }
             float tw0 = tw(TK_IT600, 16, b, 0, TK_TNUM);
-            int hot = i == 0 && tv[0] > -1000 && tv[0] >= (h->level >= SH_HEAT_SURVIVAL ? h->surv_bat_c10 : 420) - 30;
+            int hot = i == 0 && tv[0] > -1000 && tv[0] >= lim - 30;
             d_text(&d, TK_IT600, 16, CONTENT_R - 16 - tw0, y, b, 0, TK_TNUM, hot ? SVC(SV_WARN) : INK, 0);
         }
         d_text(&d, TK_IT400, 16, ROW_TX, y, "Charge", 0, 0, W(.75f), 0);
@@ -880,20 +905,20 @@ static void heat_text(void)
         y += 34;
         sv_text(&d, TK_IT400, 13, ROW_TX, y, CONTENT_R - 16 - ROW_TX, 18,
                 h->level >= SH_HEAT_SURVIVAL ? "Hold it through a pocket or a glove, never against bare skin. It runs to 2 % battery." :
+                h->level == SH_HEAT_EXTREME ? "Flat out until you stop it: it stops only at 55 \xc2\xb0" "C battery or the reserve." :
                 "It stops by itself at 42 \xc2\xb0" "C battery, 46 \xc2\xb0" "C on the back or 15 % battery.", W(.5f));
         return;
     }
-    dc d = mk(l, "sv-heat-txt", GROUP_X, HT_TXT, GROUP_W, 130, 1, 0);
-    float y = HT_TXT;
-    y += 18.0f * sv_text(&d, TK_IT400, 13, ROW_TX, y, CONTENT_R - 16 - ROW_TX, 18,
-                         "Turns the whole battery into heat, to 2 %: nothing is kept for a call, the light or SOS. Three holds start it.", W(.45f)) + 10;
+    dc d = mk(l, "sv-heat-txt", GROUP_X, HT_TXT, GROUP_W, 60, 1, 0);
     if (h->why[0] && (h->state == SH_HEAT_STOPPED || h->state == SH_HEAT_REFUSED)) {
         n = sv_cat(b, 0, h->state == SH_HEAT_REFUSED ? "Refused: " : "Last stop: ");
         int k = 0;
         while (h->why[k] && n < 94) b[n++] = h->why[k++];
         b[n] = 0;
-        sv_text(&d, TK_IT400, 14, ROW_TX, y, CONTENT_R - 16 - ROW_TX, 19, b, h->state == SH_HEAT_REFUSED ? SVC(SV_WARN) : W(.6f));
-    }
+        sv_text(&d, TK_IT400, 14, ROW_TX, HT_TXT, CONTENT_R - 16 - ROW_TX, 19, b, h->state == SH_HEAT_REFUSED ? SVC(SV_WARN) : W(.6f));
+    } else
+        sv_text(&d, TK_IT400, 13, ROW_TX, HT_TXT, CONTENT_R - 16 - ROW_TX, 18,
+                "Survival turns the whole battery into heat, to 2 %: nothing is kept for a call, the light or SOS.", W(.45f));
 }
 static void heat_controls(void)
 {
@@ -909,6 +934,7 @@ static void heat_extras(void)
 {
     sh_heat(&SV.heat);
     SV.heat_next = now_ms + 1000;
+    heat_switches();
     heat_controls();
     heat_text();
 }
@@ -921,6 +947,7 @@ static void heat_poll(float t)
     int on = ht_running(&SV.heat);
     if (on != SV.heat_on) { SV.heat_on = on; sv_rebuild(); return; }   /* the other layout: the page again */
     if (on != was || SV.heat.state != st || SV.heat.secs_run != SV.heat_secs) { heat_text(); relink(); }
+    if (!on && now_ms < SV.heat_watch) { heat_switches(); relink(); }   /* (an option's confirmation answered) */
 }
 static void heat_tap(float x, float y)
 {
@@ -935,17 +962,35 @@ static void heat_tap(float x, float y)
     }
     if (x < GROUP_X || x >= CONTENT_R) return;
     int lv = 0, min = 0;
-    if (y >= HT_ROW && y < HT_ROW + 4 * 47) {
+    if (y >= HT_ROW && y < HT_ROW + HT_NL * 47) {
         int i = (int)((y - HT_ROW) / 47);
         lv = HT_LV[i];
-        min = lv == SH_HEAT_KEEPWARM ? 0 : HT_DM[SV.heat_dur];
+        min = lv <= SH_HEAT_HIGH ? HT_DM[SV.heat_dur] : 0;
     } else if (y >= HT_SEG && y < HT_SEG + 36) {
         int i = (int)((x - GROUP_X - 2) / ((GROUP_W - 4) / 3));
         SV.heat_dur = i < 0 ? 0 : i > 2 ? 2 : i;
         sv_rebuild();
         return;
     } else if (y >= HT_SURV && y < HT_SURV + 47) {
-        lv = SH_HEAT_SURVIVAL;
+        lv = ht_tripoff() ? SH_HEAT_SURVIVAL_X : SH_HEAT_SURVIVAL;
+    } else if (y >= HT_SURV + 47 && y < HT_SURV + 188) {   /* the options: the kernel asks where classic asks */
+        int r = (int)((y - HT_SURV - 47) / 47);
+        if (r == 2) {
+            sh_pref_set_int("heat.tripoff", !ht_tripoff());
+            toast(ht_tripoff() ? "Survival Heat: the hardware trip off (four holds)" : "Survival Heat: the hardware trip stays on");
+        } else if (sh_heat_opt_set(r == 0 ? SH_HO_ALL_OUT : SH_HO_UNLIMITED, !sh_heat_opt(r == 0 ? SH_HO_ALL_OUT : SH_HO_UNLIMITED)) < 0)
+            toast("Can't change it now");
+        SV.heat_watch = now_ms + 20000;
+        heat_switches();
+        relink();
+        return;
+    } else if (y >= HT_BAT + 20 && y < HT_BAT + 56) {
+        int i = (int)((x - GROUP_X - 2) / ((GROUP_W - 4) / 4));
+        i = i < 0 ? 0 : i > 3 ? 3 : i;
+        if (sh_heat_opt_set(SH_HO_BAT_C10, HT_BC[i]) < 0) toast("Can't change it now");
+        SV.heat_watch = now_ms + 20000;
+        sv_rebuild();                   /* (a limit above 55 C asks first: the page again when it is answered) */
+        return;
     } else return;
     if (sh_heat_start(lv, min) < 0) {
         sh_heat(&SV.heat);
@@ -1975,7 +2020,8 @@ static int sv_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
         else if (!tk_strcmp(k, "power") && in && y >= L2_ROW && y < L2_ROW + 94) { q = (tk_rect){ SV_SW_X, (y < L2_ROW + 47 ? L2_ROW : L2_ROW + 47) + 8, 51, 31 }; qr = 15.5f; hit = 1; }
         else if (!tk_strcmp(k, "usb") && SV.usb.state == SH_USB_ON && x >= 24 && x < 366 && y >= 690 && y < 756) { q = (tk_rect){ 24, 690, 342, 66 }; qr = 33; hit = 1; }
         else if (!tk_strcmp(k, "heat") && SV.heat_on && x >= 24 && x < 366 && y >= 690 && y < 756) { q = (tk_rect){ 24, 690, 342, 66 }; qr = 33; hit = 1; }   /* 9j */
-        else if (!tk_strcmp(k, "heat") && !SV.heat_on && in && y >= HT_ROW && y < HT_ROW + 4 * 47) { q = (tk_rect){ GROUP_X, HT_ROW + 47 * (int)((y - HT_ROW) / 47), GROUP_W, 46 }; qr = 16; hit = 2; }
+        else if (!tk_strcmp(k, "heat") && !SV.heat_on && in && y >= HT_ROW && y < HT_ROW + HT_NL * 47) { q = (tk_rect){ GROUP_X, HT_ROW + 47 * (int)((y - HT_ROW) / 47), GROUP_W, 46 }; qr = 16; hit = 2; }
+        else if (!tk_strcmp(k, "heat") && !SV.heat_on && in && y >= HT_SURV + 47 && y < HT_SURV + 188) { float ry = HT_SURV + 47 * (int)((y - HT_SURV) / 47); q = (tk_rect){ SV_SW_X, ry + 8, 51, 31 }; qr = 15.5f; hit = 1; }
         else if (!tk_strcmp(k, "heat") && !SV.heat_on && in && y >= HT_SURV && y < HT_SURV + 47) { q = (tk_rect){ GROUP_X, HT_SURV, GROUP_W, 46 }; qr = 16; hit = 2; }
         else if (!tk_strcmp(k, "sun") && x >= CONTENT_R - 120 && y >= SUN_LOC && y < SUN_LOC + 47) { q = (tk_rect){ GROUP_X, SUN_LOC, GROUP_W, 47 }; qr = 16; hit = 2; }
         else if (!tk_strcmp(k, "sun") && SV.fix_have && in && y >= SUN_LOC + 47 && y < SUN_LOC + 47 + SUN_FIX_ROW) { q = (tk_rect){ GROUP_X, SUN_LOC + 47, GROUP_W, SUN_FIX_ROW }; qr = 16; hit = 2; }

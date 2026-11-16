@@ -3501,9 +3501,9 @@ int sh_usb_console_on(void) { return sh_pref_int("dev.usb", 0) == 1; }
 /* 9j: Survival Heat (kern/heater.c): its limits, refusals and confirmations are the kernel's; a dry run in the self test */
 int sh_heat_start(int level, int minutes)
 {
-    if (level != SH_HEAT_LOW && level != SH_HEAT_MEDIUM && level != SH_HEAT_HIGH && level != SH_HEAT_KEEPWARM &&
-        level != SH_HEAT_SURVIVAL)
-        return -1;                                   /* (Extreme, Manual and trip-off stay classic-only) */
+    if (level != SH_HEAT_LOW && level != SH_HEAT_MEDIUM && level != SH_HEAT_HIGH && level != SH_HEAT_EXTREME &&
+        level != SH_HEAT_KEEPWARM && level != SH_HEAT_SURVIVAL && level != SH_HEAT_SURVIVAL_X)
+        return -1;                                   /* (9k: Manual, its clocks picked per cluster, stays classic-only) */
 #ifdef SBOS_SELFTEST_NEXT
     sb_log("next: heat: would start (a dry run: the self test)");
     (void)minutes;
@@ -3514,6 +3514,22 @@ int sh_heat_start(int level, int minutes)
 #endif
 }
 void sh_heat_stop(void) { if (heater_running_ui()) (void)heater_request(0, 0); }
+int sh_heat_opt(int which)
+{
+    return which == SH_HO_ALL_OUT ? heat_all_out : which == SH_HO_UNLIMITED ? heat_unlimited : heat_surv_bat_c10;
+}
+int sh_heat_opt_set(int which, int v)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)which; (void)v;
+    sb_log("next: heat: an option would change (a dry run: the self test)");
+    return -1;
+#else
+    if (sbos_selftest_enabled) return -1;
+    uint64_t id = which == SH_HO_ALL_OUT ? SET_HEAT_ALL_OUT : which == SH_HO_UNLIMITED ? SET_HEAT_UNLIMITED : SET_HEAT_SURV_BAT_C10;
+    return ksetting_set(id, (uint64_t)(int64_t)v) < 0 ? -1 : 0;
+#endif
+}
 /* 9k: the fire starter (kern/survival.c's surv_fs_*): the kernel's gate, limits and finger cut; a dry run in the self test */
 int sh_fire_start(int pulse_ms, int repeat, int ilim_ma, int ov, int wool)
 {

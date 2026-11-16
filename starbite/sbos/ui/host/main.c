@@ -442,6 +442,9 @@ int sh_heat_start(int level, int minutes)
     return 0;
 }
 void sh_heat_stop(void) { if (hheat.on) fprintf(stderr, "heat: stop\n"); hheat.on = 0; }
+static int hho[3] = { 1, 0, 550 };
+int sh_heat_opt(int which) { return hho[which]; }
+int sh_heat_opt_set(int which, int v) { fprintf(stderr, "heat: option %d = %d (pretend; the kernel would ask)\n", which, v); hho[which] = v; return 0; }
 void sh_heat(sh_heat_t *h)
 {
     memset(h, 0, sizeof(*h));

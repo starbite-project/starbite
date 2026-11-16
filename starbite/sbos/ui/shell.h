@@ -270,7 +270,12 @@ const char *sh_usb_guide(int i);          /* the guidance's line i (NULL past th
 /* 9j: Survival Heat (the kernel's heater.c, its own limits and confirmations: the first use, Keep warm's, Survival's
  * three holds through sh_confirm). States = sbapp.h HEAT_ST_*, levels = HEAT_* (no Extreme / Manual / trip-off in Next) */
 enum { SH_HEAT_OFF = 0, SH_HEAT_RUNNING, SH_HEAT_HOLDING, SH_HEAT_PAUSED, SH_HEAT_STOPPED, SH_HEAT_REFUSED, SH_HEAT_CONFIRM };
-enum { SH_HEAT_LOW = 1, SH_HEAT_MEDIUM = 2, SH_HEAT_HIGH = 3, SH_HEAT_KEEPWARM = 6, SH_HEAT_SURVIVAL = 7 };
+enum { SH_HEAT_LOW = 1, SH_HEAT_MEDIUM = 2, SH_HEAT_HIGH = 3, SH_HEAT_EXTREME = 4, SH_HEAT_KEEPWARM = 6, SH_HEAT_SURVIVAL = 7,
+       SH_HEAT_SURVIVAL_X = 8 /* 9k: the chip's trip off (four holds) */ };
+/* 9k: Survival's options, the kernel's settings (asked like classic's: Unlimited, a battery limit above 55 C) */
+enum { SH_HO_ALL_OUT, SH_HO_UNLIMITED, SH_HO_BAT_C10 };
+int sh_heat_opt(int which);
+int sh_heat_opt_set(int which, int v);        /* < 0 refused (running, a self test); 0 done or asked */
 typedef struct {
     int state, level, secs_left, secs_run;    /* secs_left 0: until stopped */
     int bat_c10, soc_c10, skin_c10;           /* -1000 unknown */
