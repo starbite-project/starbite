@@ -1,0 +1,30 @@
+# S6e v2: room on the card root (304 MiB free of 16 GiB on 2026-11-16). Things macOS on the phone has no use for.
+# Everything here is plain data Apple ships for other hardware or other languages; no program on the phone needs it.
+# card-root-meta-sync.py remove: a path that is not there is skipped ("not there").
+#
+# Mac firmware updaters (iBridge / T2, USB-C, display): for real Macs
+/usr/standalone
+# manual pages
+/usr/share/man
+# legacy screen savers and Quartz Composer compositions
+/System/Library/Screen Savers
+/System/Library/Compositions
+# printer drivers and filters: no printing from the phone
+/System/Library/Printers
+# keyboard / autocorrect language data for languages other than English (and Finnish, which has no bundle here)
+/System/Library/LinguisticData/RequiredAssets_ar.bundle
+/System/Library/LinguisticData/RequiredAssets_bn.bundle
+/System/Library/LinguisticData/RequiredAssets_cs.bundle
+/System/Library/LinguisticData/RequiredAssets_gu.bundle
+/System/Library/LinguisticData/RequiredAssets_ja.bundle
+/System/Library/LinguisticData/RequiredAssets_ko.bundle
+/System/Library/LinguisticData/RequiredAssets_ml.bundle
+/System/Library/LinguisticData/RequiredAssets_pa.bundle
+/System/Library/LinguisticData/RequiredAssets_pl.bundle
+/System/Library/LinguisticData/RequiredAssets_ru.bundle
+/System/Library/LinguisticData/RequiredAssets_ta.bundle
+/System/Library/LinguisticData/RequiredAssets_te.bundle
+/System/Library/LinguisticData/RequiredAssets_th.bundle
+/System/Library/LinguisticData/RequiredAssets_yue-Hant.bundle
+/System/Library/LinguisticData/RequiredAssets_zh-Hans.bundle
+/System/Library/LinguisticData/RequiredAssets_zh-Hant.bundle

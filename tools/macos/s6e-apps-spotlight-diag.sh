@@ -14,6 +14,7 @@
 #    the kernel command line has sbdiag=1 (then: do the seven apps start, mds state, and the error lines of
 #    Notification Center, the wallpaper programs, the icon services, mds and the apps, as "SBDIAG"/"SBLOG" lines).
 #
+# v2: cycle 1 also frees room (tools/macos/s6e-free-space.txt); the card root had 304 MiB free of 16 GiB.
 # Two cycles, never one (s3zg): blocks freed by remove and taken again by add in one image would not be pushed whole.
 # BETWEEN THE CYCLES THE CARD HAS NO launchd.plist: macOS must not be booted until "S6E OK". If the script stops
 # after "cycle 1 pushed", run it again with RESUME=2 (the card's originals are kept in build/macos15/s6e/card).
@@ -76,9 +77,14 @@ if [ "${RESUME:-1}" = 1 ]; then
 	I=$D/root-card-rm.img
 	python3 $T pull "$I"
 	have=$(free_mb "$I")
-	echo "card root: $have MiB free; this step needs $need_mb MiB (the files + 150 MiB kept free)"
-	[ "$have" -ge "$need_mb" ] || { echo "NOT ENOUGH ROOM on the card root: nothing was changed"; rm -f "$I" "$I".*; exit 3; }
-	python3 $T remove "$I" "$D/remove.txt"
+	# S6e v2 (the first run stopped here: 304 MiB free, 320 needed): cycle 1 also removes things macOS on the phone has
+	# no use for (tools/macos/s6e-free-space.txt), and the room is checked on the image AFTER the removals, still
+	# before anything is written to the card.
+	cat "$D/remove.txt" tools/macos/s6e-free-space.txt > "$D/remove-all.txt"
+	python3 $T remove "$I" "$D/remove-all.txt"
+	after=$(free_mb "$I")
+	echo "card root: $have MiB free, $after MiB after the removals; cycle 2 needs $need_mb MiB (the files + 150 MiB kept free)"
+	[ "$after" -ge "$need_mb" ] || { echo "NOT ENOUGH ROOM on the card root: nothing was changed"; rm -f "$I" "$I".*; exit 3; }
 	python3 $T plan "$I"
 	python3 $T push "$I" --dry-run
 	python3 $T push "$I"

@@ -29,4 +29,6 @@ show wall '(process == "WallpaperAgent" OR process == "WallpaperVideoExtension" 
 show icon '(process == "iconservicesagent" OR process == "iconservicesd" OR process == "System Settings" OR subsystem CONTAINS[c] "iconservices") AND (messageType == error OR messageType == fault OR eventMessage CONTAINS[c] "icon")' 80
 show mds '(process == "mds" OR process == "mds_stores" OR process == "Finder") AND (messageType == error OR messageType == fault)' 50
 show apps '(process == "Books" OR process == "Freeform" OR process == "Maps" OR process == "Music" OR process == "Photos" OR process == "TV" OR process == "Weather" OR process == "runningboardd" OR process == "launchservicesd") AND (messageType == error OR messageType == fault)' 80
+# what launchd itself logs (S6f: it spends 14 % of a core on an idle desktop)
+/usr/bin/tail -80 /private/var/log/com.apple.xpc.launchd/launchd.log 2>&1 | /usr/bin/cut -c1-220 | /usr/bin/sed 's/^/SBLOG launchd /'
 echo "SBDIAG done"
