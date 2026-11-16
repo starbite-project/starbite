@@ -1,0 +1,16 @@
+# The catalog row for the new GPU driver (docs/WIN11-GPU.md 6.108). Append to the live catalog after "win11-big".
+# It starts the same firmware image and the same Windows install as "Windows 11 (big cores)"; the only difference
+# the loader makes is wdt = 80 (the other Windows rows: 82). Windows' sbwdog.sys records that value, and sbsel.dll
+# loads sbumd-ng.dll (sbumd 0167) when it reads 80 s, sbumd.dll otherwise. Do not change wdt on this row, and do
+# not give any other Windows row wdt = 80. No new store file: windows-big3i.uefi is already in the store.
+[[entry]]
+key = "win11-ng"
+name = "Windows 11 (new GPU)"
+version = "23H2 · new GPU driver · games; some apps black"
+category = "microsoft"
+method = "uefi"
+tag = "experimental"
+files = ["windows-big3i.uefi"]
+root = "ufs:WINDOWS (NTFS)"
+wdt = 80
+wdt_feed = "own"

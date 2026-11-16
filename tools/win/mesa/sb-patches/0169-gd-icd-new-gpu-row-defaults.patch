@@ -1,0 +1,84 @@
+From 2c9c8ff4df9a7bc6d00a9394d21d70f310a75ec2 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 10:37:16 +0200
+Subject: [PATCH] 0169: on the catalog row Windows 11 (new GPU) (sbwdog State
+ WtDat = 80 s) the zero-copy FLIP_DISCARD present with the present thread is
+ the default (flag file ngzcoff turns it off); every other row: flag files
+ only, as before
+
+---
+ src/gallium/targets/wgl/wgl_sb_zc.cpp | 44 +++++++++++++++++++++++++--
+ 1 file changed, 42 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/targets/wgl/wgl_sb_zc.cpp b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+index 29cdbfe..970ede7 100644
+--- a/src/gallium/targets/wgl/wgl_sb_zc.cpp
++++ b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+@@ -68,15 +68,54 @@ static bool zc_log;
+ #define ZLOG(...) do { if (zc_log) { fprintf(stderr, "sb gl zc: " __VA_ARGS__); fflush(stderr); } } while (0)
+ #define ZERR(...) do { fprintf(stderr, "sb gl zc: " __VA_ARGS__); fflush(stderr); } while (0)
+ 
+-/* a test switch: the flag file C:\ProgramData\Starbite\<name> exists (a Steam-started game has no environment of ours) */
++/* sb-patches/0169: the catalog row "Windows 11 (new GPU)". Its entry arms the watchdog with 80 s where the other
++ * Windows rows use 82 s, and sbwdog.sys records the reload value it found (Services\sbwdog\State\WtDat, 793.457
++ * counts a second: 80 s = 63477, 82 s = 65063). sbsel.dll picks the D3D driver by the same value. On that row the
++ * zero-copy present on a FLIP_DISCARD swap chain with the present thread is the default (T79: Geometry Dash at its
++ * 60 cap); the flag file ngzcoff turns the default off. On every other row nothing changes: flag files only. */
+ static bool
+-zc_flag(const char *name)
++zc_file(const char *name)
+ {
+    char path[96];
+    snprintf(path, sizeof(path), "C:\\ProgramData\\Starbite\\%s", name);
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+ }
+ 
++static bool
++zc_new_gpu_row(void)
++{
++   static LONG v = -1;
++   LONG c = v;
++   if (c < 0) {
++      HKEY k;
++      DWORD dat = 0, type = 0, n = sizeof(dat);
++      c = 0;
++      if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\sbwdog\\State", 0,
++                        KEY_QUERY_VALUE, &k) == ERROR_SUCCESS) {
++         if (RegQueryValueExA(k, "WtDat", NULL, &type, (BYTE *)&dat, &n) == ERROR_SUCCESS && type == REG_DWORD &&
++             n == sizeof(dat) && dat >= 63400u && dat <= 63560u)
++            c = 1;
++         RegCloseKey(k);
++      }
++      if (c && zc_file("ngzcoff"))
++         c = 0;
++      v = c;
++   }
++   return c == 1;
++}
++
++/* a test switch: the flag file C:\ProgramData\Starbite\<name> exists (a Steam-started game has no environment of
++ * ours); 0169: on the new-GPU row glzcflipd and glzcasync count as present */
++static bool
++zc_flag(const char *name)
++{
++   if (zc_file(name))
++      return true;
++   if ((!strcmp(name, "glzcflipd") || !strcmp(name, "glzcasync")) && zc_new_gpu_row())
++      return !zc_file("glzcflip");   /* an explicit FLIP_SEQUENTIAL request still wins over the default swap */
++   return false;
++}
++
+ static void
+ zc_state(const char *s)
+ {
+@@ -765,6 +804,7 @@ wgl_sb_zc_create_framebuffer(struct pipe_screen *screen, HWND hWnd, int iPixelFo
+       bool any = zc_flag("glzc") || zc_flag("glzcnovsync") || zc_flag("glzcflip") || zc_flag("glzcflipd");
+       if (any)
+          zc_log = 1;
++      ZLOG("row: %s\n", zc_new_gpu_row() ? "new GPU (0169: glzcflipd + glzcasync by default)" : "standard (flag files only)");
+       /* sb-patches/0160 (GD ICD tree): opt-in. In src-zc (0151) zero-copy was the default; in the game kit the
+        * async GDI present (0153) stays the default until the user's windows are shown through DWM (sbumd 0159), so
+        * zero-copy only with SB_GL_PRESENT=zc or the flag file C:\ProgramData\Starbite\glzc (read at the first
+-- 
+2.43.0
+

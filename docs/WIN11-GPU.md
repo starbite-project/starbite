@@ -3169,6 +3169,55 @@ small mini-dump reader against the build's lld map) both show the same stack:
 - This is with the candidate sbumd (0167), which is on hold for the desktop problem of 6.104; the game result
   itself stands.
 
+### 6.108 The row "Windows 11 (new GPU)": the 0167 driver as its own entry, the other rows on the driver they have
+
+(2026-11-16 15:03; built and staged, **not run on the phone yet**: T83 / T83b are the first run.) The user asked for the
+driver with the GPU fixes as a separate entry on the Starbite OS list, next to their Windows entries, which stay as
+they are (T61's sbumd 6d759c44).
+
+- **The problem.** Every Windows row starts the same install, and two of them the same firmware image; Windows
+  cannot tell rows apart by hardware, and a driver set is installed per device, not per boot. The UEFI image is
+  compressed and not ours to patch per row, and the loader passes nothing to Windows.
+- **The row signal: `wdt`.** The loader arms cluster 1's watchdog with the row's `wdt` (`wdt_arm`, count = seconds
+  x 793.457, truncated: 82 s = 65063 = 0xFE27, 80 s = 63476; 60 s = 47607 and 30 s = 23803 are in
+  STARBITE-HEALTH.md). The firmware stops the watchdog but leaves WTDAT, and `sbwdog.sys` (boot start) records it in
+  `HKLM\SYSTEM\CurrentControlSet\Services\sbwdog\State\WtDat` in its DriverEntry, before it arms anything itself.
+  All 28 pulled hives of 11-15/16 (rows with `wdt = 82`) say 65063. The new row gets **`wdt = 80`**; nothing else in
+  the loader, the firmware or a kernel driver changes. A row without `wdt` (the plain `win11` row) is never armed
+  by the loader: WTDAT is then S-Boot's own value from that boot (S-Boot runs before every boot and leaves the
+  watchdog counting), not a left-over 80 s. Not measured: no pulled hive is from such a boot.
+- **The selector: `sbsel.dll`** (`starbite/win/sbsel`, 52 KB, ARM64X, C only, no initializer tables, build.sh).
+  The adapter's `UserModeDriverName` (display class key of `acpi\strb0072`, the only place the hive names the
+  driver) becomes `sbsel.dll`. Its `OpenAdapter10` / `OpenAdapter10_2` (the two functions both sbumd builds export
+  for the runtime) load `System32\sbumd-ng.dll` when WtDat is 63400..63560, otherwise, or on any failure,
+  `System32\sbumd.dll`, and forward. The real driver stays loaded for the life of the process. With the file
+  `C:\ProgramData\Starbite\sbsellog` each process appends one line to `umdlog\sbsel.log` (exe, pid, WtDat,
+  driver): that is how a test sees what DWM loaded. Without the file it writes nothing.
+- **Files.** `sbumd-ng.dll` = sbumd 0167 (d39b83ab). `sbumd.dll` is not written by the install; the standard rows
+  load the same bytes as today, through 52 KB of new code. Kernel drivers are shared (both sets use sbwddm
+  d85e0d3a). A test cycle's `sbumd.dll` push still lands on the standard rows only.
+- **The game: GL kit 0169** (src-tc 2c9c8ff, `sb-patches/0169`): on the new row (same registry value) `glzcflipd`
+  and `glzcasync` count as present, so Geometry Dash presents zero-copy on a FLIP_DISCARD swap chain with the
+  present thread (T79: its 60 cap) without flag files; `ngzcoff` turns that off. On every other row: flag files
+  only, i.e. the GDI present of today. The kit is one pair of files in the game folder for all rows, so installing
+  it changes the game's GL driver binary on the standard rows too (same code path as 0158 there; T83b measures it).
+- **Tools.** `tools/win/hive-umdname.py` (offline hive: show / set sbsel.dll / set sbumd.dll; round trip on a copy
+  of the user's hive: only that value differs, and setting it back restores the key's values byte for byte),
+  `tools/win/sbsel-install.sh` (show / install / restore / log on|off, TWRP; syntax-checked only),
+  `tools/win/ng-stage.sh` (stages `sbwddm-ng-0169` and `sbwddm-t83`), `starbite/win/autotest/sb-rows.bat` (T83).
+- **The row** (`starbite/win/sbsel/catalog-row.toml`): key `win11-ng`, "Windows 11 (new GPU)", version
+  "23H2 · new GPU driver · games; some apps black", `files = ["windows-big3i.uefi"]` (already in the store),
+  `wdt = 80`, `wdt_feed = "own"`. It packs (sbstore2 catalog: wdt 80 in the extension table). **The live catalog
+  is full: 32 rows of the loader's CAT_MAX 32.** One row has to be dropped for it; that choice is not mine.
+- **Limits.** (1) The store setting "watchdog off" or "one value for every entry" removes the signal: the new row
+  then runs the standard driver. (2) A process that cannot read the State key loads the standard driver. (3) The
+  0167 driver's open problems come with the row (6.104: DWM job timeouts from Edge's start, black classic-app
+  windows in screen shots). (4) Nothing here has run on the phone: the selector has never been loaded by Windows.
+- **T83 / T83b** (`build/win/stage/sbwddm-t83`, T61's drivers + sb-rows.bat): one boot of `win11-ng`, one of
+  `win11-big`. Each logs the WtDat it sees, the driver name, the three files' hashes, a blt and a flip window
+  with shots, DWM survived or not, a Geometry Dash run with kit 0169, the selector log and a verdict
+  (new row: every process `-> sbumd-ng.dll`; standard row: every process `-> sbumd.dll`).
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
