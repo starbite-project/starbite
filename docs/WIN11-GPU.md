@@ -3709,6 +3709,37 @@ measured.)
   script now also saves the two new values in `umdlog\hang-<step>.txt`). T93 answers what T92 (`idxcopy`) tests
   indirectly, and for the positions as well.
 
+### 6.126 Chain results, part 13: T90s / T90, fix build A: 99 of 111 with everything off; the run stalled when `nirshaders` went on system-wide
+
+(2026-11-16 22:40; `build/win/results-t90s`, `build/win/results-t90`: sbumd a8a6dca8 (`sb-nir` ea8a080), the user's kernel
+drivers; measured.)
+
+- **T90s, PASS:** build A boots (blt 48.0 fps, flip 60.7 fps, 12/12, counters 0).
+- **T90 pass O (all switches off): 99 pass, 4 fail, 8 crash**, exactly build A's prediction (T82: 95 / 5 / 11; the
+  user's T61: 74 / 17 / 20). Left: FAIL pipeline_statistics_query, immediate_constant_buffer, stream_output,
+  combined_clip_and_cull_distances; CRASH layered_rendering, create_shader, clear_state, index_buffer_offset,
+  geometry_shader, stream_output_resume, clip_distance, multiple_viewports.
+- **Then the run stopped.** The pass script logged "pass N ... flags nirshaders" at 19:56:34 and created the flag
+  file; nothing more was logged in the remaining 35 minutes (the test boot's own timer restarted Windows at 2401
+  s). The test runner for pass N never opened its log; no test process started after the flag (the newest of the
+  112 driver logs of test processes is from pass O).
+- **What the flag did meanwhile:** it is a file, so it applies to every process. Windows' own Settings app started
+  65 s later and its driver log begins `shader translator: DXBC -> NIR`. The kernel driver counted **134 failed
+  jobs** by the end of the boot, none before the flag: every record is a fragment job with status **0x51
+  (invalid instruction encoding)**, no MMU fault, no timeout. So shaders of a XAML program, through the new
+  translator and the Bifrost compiler, contain instructions this GPU (architecture 6) rejects. The same status
+  was the first failure of T88's boot.
+- **Why the script stalled is not established.** The system was alive (48,621 submissions, 5,776 presents, a clean
+  timed restart). The runner flushes every line it prints and has a 60 s limit on its first child, so it either
+  never started or was blocked at start; a console host that stopped responding would do that, but nothing
+  recorded shows it.
+- **Consequences.** (1) Passes N, G, M, D, F, T, X of build A did not run: the translator fix, the MSAA fix, the
+  D3D11 interface and tessellation are still unmeasured. (2) A feature switch must not be a system-wide file
+  during a test: `sb-wt-env.bat` sets `SBSW_<name>=1` in the test processes' environment instead (the driver side
+  comes with fix build B) and starts a one-minute heartbeat (`sb-beat.bat`: the time and the programs that do
+  not respond). (3) Fix round B is in work on this data: the environment override, the 0x51 encodings, the 12
+  tests left in pass O, and the shader dump for the new tree.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
