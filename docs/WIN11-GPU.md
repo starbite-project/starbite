@@ -3838,6 +3838,21 @@ morning's tests need first.)
   `gpu-cycle --install-default`, the standard rows) and `sbwddm-ng-dsb67` (`sbsel-install.sh install`, the new row's
   `sbumd-ng.dll`).
 
+### 6.131 T93n: with IDVS off the vertex job "finishes", yet the tiler mostly reads untouched memory
+
+(2026-11-17 02:28; `build/win/results-t93n`: KMD b78e + sbumd b78d with `noidvs`; measured.)
+
+- The storm as always (25 timeouts when Calculator is closed, 113 after the kept-open step); all 21 hang records
+  are `job tiler` with the separate vertex job of the draw done. Indices valid in every record (840..899, base -840).
+- The position buffer the stuck tiler job reads (Panfrost stores screen-space x, y, z and 1/w there): **all zero in
+  6 of 9 records**; once (#13) plausible screen positions ((79, 972, 0.5, 1/w = 1) ...); twice values that are not
+  positions at all ((0.344, 0.344, 0.344, 0.344), (0.44, 0.31, 0, 0)): leftover memory.
+- So the vertex job reports done, but in most hangs it did not leave its output where the tiler reads. That is what
+  a job built from **stale descriptors** would do (a CPU-written descriptor, e.g. the output pointer or the vertex
+  count, not yet in memory when the GPU read it), and it is consistent with 6.129: everything the GPU reads that
+  the CPU wrote goes through the same write-combined path without a barrier. Record #13 (good positions, still
+  stuck) says the tiler's own input can be the stale part too. T97 tests the barrier directly.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
