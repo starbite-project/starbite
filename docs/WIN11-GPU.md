@@ -3853,6 +3853,31 @@ morning's tests need first.)
   the CPU wrote goes through the same write-combined path without a barrier. Record #13 (good positions, still
   stuck) says the tiler's own input can be the stale part too. T97 tests the barrier directly.
 
+### 6.132 T96 and T97 refute both quick fixes; the zeros are probably the scratch page (T99 staged)
+
+(2026-11-17 02:56; `build/win/results-t96`, `build/win/results-t97`; measured.)
+
+- **T96 `posguard`** (an all-zero vertex position replaced by (0,0,0,1); its line is in DWM's log): unchanged, 21
+  timeouts when Calculator is closed, 95 after the kept-open step.
+- **T97, the store barrier before every submission** (`b78g: store barrier before each submission on` in DWM's log):
+  unchanged, 26 / 102. **So 6.129's explanation is refuted**: not CPU stores still in the write buffer. The barrier
+  builds of 6.130 (`umd-dsb61`, `umd-dsb67`, `sbwddm-user-dsb61`, `sbwddm-ng-dsb67`) are NOT to be installed;
+  T98 / T98n are void.
+- **What is left, and a better candidate.** The GPU reads zeros (or leftovers) where fresh data should be, with no
+  MMU fault (6.128, 6.131). That is exactly what the **scratch page** produces: since T49 (`ScratchUnmap`, default
+  on) an evicted allocation's GPU pages point at a read-only page of zeros instead of being unmapped, which turned
+  the T46-T48 faults of this very signature ("a DWM IDVS job stalls on memory VidMm had unmapped") into silent
+  zeros. A job that uses an allocation which is not resident (not in its submission's list, or evicted under it)
+  then reads zeros and, here, the tiler never finishes. The T87 records looked only at the job's own pointers
+  (all resident); the vertex buffer data behind the attribute descriptors were not checked.
+- **T99** (`sbwddm-t93` again: KMD b78e + sbumd b78d, `sb-apps3.bat`) with **`Parameters\ScratchUnmap` = 0** for that
+  boot: an evicted page is then not mapped at all, and the GPU **faults** on it with the address, which the KMD's
+  fault record resolves to the owning allocation (`Live_FaultLog`, FaultsInLive). Faults in DWM's allocations at
+  Calculator's start = eviction confirmed and the allocation named; the same timeouts and no faults = not eviction.
+  New tool `tools/win/sbparam.sh show|set NAME[=VALUE] OUT` (a DWORD of `Services\sbwddm\Parameters` from TWRP;
+  rehearsed on the fake phone with a copy of the user's hive). **It must be set back to 1 after the test** (the
+  install keeps parameters it does not manage).
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
