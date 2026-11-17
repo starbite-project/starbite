@@ -3901,6 +3901,21 @@ morning's tests need first.)
   again with `ScratchUnmap` = 0 for the boot: no 0x2c3 faults at Calculator's start and no black shots = fixed.
   If it holds, the user's install gets this KMD (the D3D driver unchanged).
 
+### 6.134 T100: the 1024-entry list does NOT stop the faults; the surfaces are dropped for another reason
+
+(2026-11-17 05:54; `build/win/results-t100`: KMD kmd-list1024 461ff16b + the user's T61 sbumd 6d759c44, `ScratchUnmap` = 0 for
+the boot; measured.)
+
+- Same as T99: at Calculator's start 15 failed jobs, 2 of them timeouts, so 13 faults; over the boot 121 failed, 100
+  timeouts, **21 faults in live allocations** (`FaultsInLive`), e.g. `LIVE 0x3dec000+16p Taskmgr, mapped 0 pte 0,
+  unmapped 20 s before, NOT listed (last 2877 renders before)`. Calculator shot 100 % black, calc-hold 47 %.
+- So the overflow of 6.133 is not the (whole) reason: with room for 1024 entries, surfaces of other processes are
+  still left out of DWM's submissions for thousands of submissions. With the user's T61 sbumd too, so it is not
+  0167. Next to look at: when the shim forgets an opened allocation (GEM_CLOSE of a kind-2 BO clears it at once,
+  while DWM's composition may still sample that surface), and on which of DWM's devices the opening and the
+  sampling happen (a BO is listed only by the device that opened it).
+- **`sbwddm-user-list1024` is not to be installed.** The tiler hang is unchanged (100 timeouts).
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
