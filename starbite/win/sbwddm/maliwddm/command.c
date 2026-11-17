@@ -18,7 +18,11 @@ NTKERNELAPI PCHAR PsGetProcessImageFileName(PEPROCESS Process);   /* T27: export
 
 #define MW_DMA_MAGIC            0x4D57444Du /* 'MWDM' in the private data */
 #define MW_DMA_BUFFER_SIZE      (16 * 1024)
-#define MW_LIST_SIZE            256     /* Panfrost submits reference many BOs */
+/* T99 (docs/WIN11-GPU.md 6.133): 256 was too few. DWM's device holds up to ~390 live BOs; when the list was full the
+ * shim's forced listing of allocations opened from other processes (sb-patches/0138) was cut off, VidMm evicted such
+ * a surface (an Explorer window) under DWM's fragment jobs, and with the scratch page they read zeros: the black
+ * windows. 1024 entries (and as many patch locations, PatchEveryAllocation writes one per allocation). */
+#define MW_LIST_SIZE            1024    /* Panfrost submits reference many BOs */
 /* T41 (docs/WIN11-GPU.md 6.50): a hang is ours to end, before Windows' TDR (TdrDelay 2 s) takes the engine. T38-T40a
  * hung the GPU (4 chains of 2 s each), and dxgmms1 then faulted (0x7E +0x41cd4): our 2000 ms chain timeout raced
  * Windows' 2 s packet timeout, and ResetEngine misreported what it dropped. Now a chain gets 750 ms and a whole

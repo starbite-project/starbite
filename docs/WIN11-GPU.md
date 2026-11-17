@@ -3878,6 +3878,29 @@ morning's tests need first.)
   rehearsed on the fake phone with a copy of the user's hive). **It must be set back to 1 after the test** (the
   install keeps parameters it does not manage).
 
+### 6.133 T99: the black windows are evicted surfaces read through the zero page; the tiler hang is not eviction
+
+(2026-11-17 05:41; `build/win/results-t99`: KMD b78e + sbumd b78d, `Parameters\ScratchUnmap` = 0 for this boot only; measured.)
+
+- **At Calculator's start, 15 failed jobs that are not timeouts** (logon 0; calc +5 s: 1 timeout, 16 failed). The 13
+  records in the ring are **MMU faults (0x2c3, read translation)** of DWM **fragment** jobs (slot 0) at
+  0x23530000, every one in the same allocation: `LIVE 0x23530000+16p explorer`, **mapped 0, pte 0, unmapped 4-9 s
+  before, NOT listed (last 859-1049 renders before)**. A 16-page surface owned by **Explorer** that DWM composes
+  (an allocation opened from another process) had been evicted by VidMm, because DWM's submissions no longer
+  listed it. With the scratch page (the default), these reads return zeros: **that is the black window content**
+  of T78 / T87 (black or 47-91 % black shots of classic apps while DWM's own frames show them).
+- **Why it was not listed:** the shim lists every opened allocation in every submission (sb-patches/0138), but stops
+  when the allocation list is full; the KMD gives each context **256** entries (`MW_LIST_SIZE`), DWM holds ~390
+  live BOs, and the b78 log showed `allocation list full: 256 of 256 entries, ... 9-15 more BOs left out`.
+- **The tiler hang is a separate fault:** from Calculator's close on, the indexed-vertex timeouts continue (21 when
+  closed, 98 after the kept-open step) with **no MMU fault** even with the zero page off. So its zeros are not
+  evicted memory. Still unexplained (6.131: the vertex job ends, but the position memory the tiler reads is mostly
+  untouched).
+- **Fix for the black windows, KMD `kmd-list1024`** (461ff16b; = b78e + `MW_LIST_SIZE` 1024; signed, 0 LSE words):
+  room for every BO DWM has. **T100** (`sbwddm-t100`: this KMD + the user's own T61 sbumd 6d759c44, `sb-apps3.bat`),
+  again with `ScratchUnmap` = 0 for the boot: no 0x2c3 faults at Calculator's start and no black shots = fixed.
+  If it holds, the user's install gets this KMD (the D3D driver unchanged).
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
