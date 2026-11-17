@@ -1,0 +1,52 @@
+From 7859ad8e7e9d055c2ada640f23b8399035c975ac Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Tue, 17 Nov 2026 02:16:33 +0200
+Subject: [PATCH] b78g: a full store barrier (DSB SY) on the submitting core
+ before every Render: under WDDM the GPU is started later from another thread
+ and core, so the CPU writes of vertices, indices and descriptors in
+ write-combined memory were never drained before the GPU read them (T93: the
+ stuck draws positions = attribute data read as zeros); flag file nodsb turns
+ it off
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/win32-compat/malikm_drm.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index 30d64f2..2e04945 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -1527,9 +1527,29 @@ malikm_devstate_note(const char *what, unsigned arg)
+ 
+ /* Render what is in the command buffer and allocation list; on return the buffers are the new ones the
+  * runtime handed back and d->seq counts this submission. */
++/* b78g (T93 + the dumped vertex shader of the T78/T87 storm: its position is (x, y, 0, attribute0.z), and in 7 of 9
++ * hang records all 60 positions were zero = the GPU read zeros where the compositor had just written its vertices).
++ * The CPU writes vertices, indices and descriptors into write-combined mappings. On Linux the submit ioctl rings the
++ * GPU from the same CPU, behind the kernel's own store barrier, so those writes have drained before the GPU reads.
++ * Under WDDM a Render only queues: the GPU is started later from VidMm's scheduler on another thread and usually
++ * another core, and nothing ever drains the writing core's buffered stores. So: a full data synchronization barrier
++ * on this core before every submission. Flag file nodsb = without it (for an A/B). */
++static void
++sb_drain_writes(void)
++{
++   static int off = -1;
++   if (off < 0) {
++      off = GetFileAttributesA("C:\\ProgramData\\Starbite\\nodsb") != INVALID_FILE_ATTRIBUTES;
++      fprintf(stderr, "sbumd: b78g: store barrier before each submission %s\n", off ? "OFF (flag file nodsb)" : "on");
++   }
++   if (!off)
++      __builtin_arm_dsb(15);              /* DSB SY */
++}
++
+ static NTSTATUS
+ w_render(struct sbdev *d, UINT commandLength, UINT allocations)
+ {
++   sb_drain_writes();
+    if (d->on) {
+       D3DDDICB_RENDER r = {0};
+       /* 0163: the allocation list as submitted (the runtime hands back a new one), for the devstate log */
+-- 
+2.43.0
+

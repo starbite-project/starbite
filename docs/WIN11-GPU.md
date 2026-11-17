@@ -3788,6 +3788,42 @@ morning's tests need first.)
     the shader reads as zero is the first suspect: w = 0 for every vertex needs the transform's last row to be 0).
   The T92 `nirdump` run (tonight) writes that vertex shader's NIR and binary.
 
+### 6.129 The stuck draw's vertex shader: its position is the vertex data itself. Likely cause: no store barrier before a submission (T97 staged)
+
+(2026-11-17 02:17; `build/win/results-t92-idxcopy`, `results-t92-nirdump`; measured, plus reading. The fix is compiled only.)
+
+- **T92 `idxcopy`:** unchanged (18 timeouts when Calculator is closed, 108 after the kept-open step), as T93's valid
+  indices predicted. Its log also showed the flag FILE `nirshaders` still on the phone (left by T90's stalled run;
+  the restores do not touch flag files). Harmless for every build that ran tonight (none has the new translator);
+  the main session removes it after the night's last restore.
+- **T92 `nirdump`:** 285 vertex-shader variants dumped, 52 of them DWM's. The draw trace names the hung draws'
+  shader by its code address 0xa12f000: `umdlog\nir-1096-4.txt`, 3648 bytes, IDVS, 4 constant buffers, 6 vertex
+  inputs, 8 outputs (a composition shader with a perspective transform for 3D-transformed visuals). Its position
+  output is
+  `vec4(in0.x * cb1[0].x + in0.z * cb1[0].z,  in0.y * cb1[0].y + in0.z * cb1[0].w,  0.0,  in0.z)`:
+  **w is vertex attribute 0's z**, and x and y come from attribute 0 too. So T93's all-zero positions mean the GPU
+  **read zeros where attribute 0's data should be**, for all 60 vertices of the draw. Not a shader that computes
+  zeros, not the constant buffers.
+- **Why the GPU would read zeros (or stale data, the two odd records of 6.128):** DWM writes these vertices just
+  before the draw, through a CPU mapping of the buffer; our segment is not cache-coherent and VidMm maps it
+  write-combined. On ARM64 such stores sit in the writing core's write buffer until they drain; an observer outside
+  the CPU (the GPU) sees them only after a store barrier on that core. Panfrost on Linux gets that barrier for free:
+  the submit ioctl rings the GPU from the same CPU behind the kernel's own barrier. Under WDDM, `Render` only
+  queues: the GPU is started later by `DxgkDdiSubmitCommand` on VidMm's scheduler thread, usually on another core,
+  and **nothing in our user-mode driver issues any barrier** (no DSB/DMB in `malikm_drm.c`; checked). So a draw can
+  start before its freshly written vertices are in memory. With most shaders that means one frame of wrong
+  geometry nobody notices; with this one it means w = 0 and a tiler that never finishes. That fits every
+  observation: intermittent (~1 per second), only while that kind of window is composed, the same draw shape, the
+  vertex job finishing (T87n) and the tiler sticking, no MMU fault, buffer reuse irrelevant (T91 `newbo`: new pages
+  are zero too), and present in the user's T61 driver (same shim).
+- **Fix candidate, sbumd b78g** (`sb-b78` 7859ad8, `sb-patches/0182`, `build/win/umd-b78g` 8591b165): `DSB SY` on the
+  submitting core at the top of `w_render`, before every submission to the kernel; flag file `nodsb` turns it off
+  for an A/B. The instruction is in both halves of the linked DLL (checked by disassembly).
+- **T97** (`sbwddm-t97`: KMD b78e + sbumd b78g, `sb-apps3.bat`, no flags): timeouts 0 with Calculator open and kept
+  open = confirmed. Then the barrier goes into every driver tree: the user's T61 line, 0167, the new tree, and the
+  GL kit (same shim; Geometry Dash's vertex data takes the same path).
+- Still running tonight: T93n (`noidvs` positions: should be zeros too), T96 (`posguard`: hides the symptom).
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
