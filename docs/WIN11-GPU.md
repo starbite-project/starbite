@@ -3824,6 +3824,20 @@ morning's tests need first.)
   GL kit (same shim; Geometry Dash's vertex data takes the same path).
 - Still running tonight: T93n (`noidvs` positions: should be zeros too), T96 (`posguard`: hides the symptom).
 
+### 6.130 The store barrier in the drivers the user runs (ready for when T97 confirms)
+
+(2026-11-17 02:22; **compiled only**; `sb-patches/0183`, `build/win/patchwork/add-dsb.py`, `build-dsb.sh`.)
+
+- **Which source the user's driver is:** T61's sbumd 6d759c44 was built at 08:19 on 11-13 in `build-int-x`
+  (`sbumd-arm64x.6d759c44.dll`), one minute before `src-int` commit fbc32c3 (0155) was recorded: it is fbc32c3.
+- **T61 + barrier:** `src-dsb61` = fbc32c3 + 0183 only, `build/win/umd-dsb61` **63b76fff**. **0167 + barrier:**
+  `src-dsb67` = b8730f0 + 0183 only, `build/win/umd-dsb67` **61fc9096**. Both: ARM64X check 0 fails, 0 initializers,
+  the DSB SY in both halves (disassembly). Nothing else differs from what the user runs.
+- **Staged:** `sbwddm-t98` (the user's kernel drivers + T61+barrier, `sb-apps3.bat`) and `sbwddm-t98n` (+ 0167+barrier):
+  the Calculator test on exactly the drivers that would be installed. Install sets: `sbwddm-user-dsb61` (for
+  `gpu-cycle --install-default`, the standard rows) and `sbwddm-ng-dsb67` (`sbsel-install.sh install`, the new row's
+  `sbumd-ng.dll`).
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,

@@ -1,0 +1,44 @@
+From 5ac0f11789e1836a17543e09fbf9538bc11b323f Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Tue, 17 Nov 2026 02:20:16 +0200
+Subject: [PATCH] 0183: a full store barrier (DSB SY) before every submission
+ (docs/WIN11-GPU.md 6.129)
+
+---
+ include/win32-compat/malikm_drm.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index fb484d3..503257a 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -1309,9 +1309,26 @@ ring_push(struct sbdev *d, uint64_t seq, HANDLE ev)
+ 
+ /* Render what is in the command buffer and allocation list; on return the buffers are the new ones the
+  * runtime handed back and d->seq counts this submission. */
++/* sb-patches/0183 (docs/WIN11-GPU.md 6.129): the CPU writes vertices, indices and job descriptors into write-combined
++ * mappings. On Linux the submit ioctl starts the GPU from the writing CPU behind the kernel's own store barrier; under
++ * WDDM a Render only queues, and the GPU is started later by VidMm's scheduler on another thread and usually another
++ * core, so nothing drained this core's buffered stores before the GPU read them (T78/T87: a DWM draw whose vertices
++ * arrived as zeros hung the tiler about once a second while a XAML window was shown). A full data synchronization
++ * barrier on this core before every submission. Flag file C:\\ProgramData\\Starbite\\nodsb turns it off. */
++static void
++sb_drain_writes(void)
++{
++   static int off = -1;
++   if (off < 0)
++      off = GetFileAttributesA("C:\\ProgramData\\Starbite\\nodsb") != INVALID_FILE_ATTRIBUTES;
++   if (!off)
++      __builtin_arm_dsb(15);              /* DSB SY */
++}
++
+ static NTSTATUS
+ w_render(struct sbdev *d, UINT commandLength, UINT allocations)
+ {
++   sb_drain_writes();
+    if (d->on) {
+       D3DDDICB_RENDER r = {0};
+       r.hContext = d->context;
+-- 
+2.43.0
+
