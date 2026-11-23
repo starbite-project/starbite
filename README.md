@@ -2,7 +2,7 @@
 
 **One Samsung Galaxy S9 from 2018 running iOS, iPadOS, macOS, Windows 11, Linux, ChromiumOS, Android, and an operating system we wrote ourselves.** One boot loader picks between them, and our own GPU drivers draw the screen on the phone's Mali GPU.
 
-Built in October–November 2026. **Website: https://starbite-s9.github.io**
+Built in October–November 2026. **Website: https://starbite-project.github.io**
 
 ## Highlights
 
