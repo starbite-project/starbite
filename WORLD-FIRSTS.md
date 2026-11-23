@@ -243,13 +243,6 @@ Method: inventory from the repo and notes, then a web search for earlier work in
 
 **Sources:** https://newreleases.io/project/github/duhansysl/exynos9810-kernel/release/V1.9, https://www.anandtech.com/show/12620, https://newreleases.io/project/github/xxmustafacooTR/android_kernel_samsung_universal9810/release/v36
 
-## bt-6 [likely_world_first] significance 4
-**Claim:** Own installer put the whole multi-OS Starbite setup on a second stock Galaxy S9 without TWRP and without writing RECOVERY (GPT repartition, phone-to-phone stream copy).
-
-**Earlier work found:** Installers for alternative OSes on phones exist: WOA Deployer (Lumia, Raspberry Pi), the Renegade / woa-project guides for Windows on Snapdragon phones and the Surface Duo, and the postmarketOS installer. They install one OS (or Windows next to Android). No installer was found that deploys a multi-OS setup including Apple OSes. That follows directly from bt-1: such a setup did not exist elsewhere.
-
-**Sources:** https://renegade-project.tech/en/faq/, https://www.xda-developers.com/windows-11-dual-boot-on-microsoft-surface-duo/, https://github.com/woa-project
-
 ## ios-3 [first_on_this_class_of_device] significance 3
 **Claim:** iPadOS 18.7 (iPad 7 build) booted to the lock screen on a non-Apple phone on a port of xnu-11417 (2026-10-28).
 

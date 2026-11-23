@@ -18,7 +18,7 @@ The full, honest world-first check (what was first, what wasn't, with sources) i
 
 ## ⚠ Read before you try anything
 
-- **There is no installer. You figure it out.** This repo holds the source, scripts and notes we used on our own two phones. Getting it onto yours means reading code, fixing paths and working out the gaps yourself.
+- **There is no working installer. You figure it out.** We started one and never finished it: it never fully set up a phone, and several of the systems were never part of it. Every OS here was brought up by hand. This repo holds the source, scripts and notes; getting it onto your phone means reading them, fixing paths and working out the gaps yourself.
 - **Exynos Galaxy S9 (SM-G960F) only.**
 - **No Apple, Samsung, Google, Microsoft or Broadcom binaries are included**, and we won't share any. You need your own copies of every OS and of the phone's firmware (for example Wi-Fi firmware and the sensor-hub patch from your own phone's vendor partition).
 - **It can brick your phone.** It repartitions storage and runs overclocking and heat tests. Back up everything. Use at your own risk.
@@ -41,7 +41,7 @@ Each branch is one line of work, with its full history.
 | `win11-mali-gpu` | Windows WDDM GPU driver on Mesa for the Mali-G72 |
 | `win11-m3-bigcores` | Windows on the Exynos M3 big cores, and the x86 fixes |
 | `win11-bigcores-research` | The research that led there |
-| `installer` | The scripts and steps we used on our second S9 (not a finished installer) |
+| `installer` | An unfinished installer experiment. It never fully set up a phone, and several OSes were never in it |
 | `ios27-drivers` | iOS 27 notes and soak runs |
 | `utility-os-2` | Utility OS: the phone as keyboard, mouse, gamepad and drive |
 | `linux-mainline-port` | Early mainline Linux port |
@@ -59,7 +59,7 @@ Removed before publishing, so these parts will not build as is:
 
 ## Contributing
 
-**Contributions are welcome.** The project is finished on our side, but the code is here for anyone who wants to take it further: clean replacements for the known gaps, an actual installer, support for the S9+ (SM-G965F), more drivers, ports to newer OS versions. Open a pull request. We may be slow to answer, but we will look.
+**Contributions are welcome.** The project is finished on our side, but the code is here for anyone who wants to take it further: clean replacements for the known gaps, an actual installer, support for the S9+ (SM-G965F), more drivers, ports to newer OS versions, and a real installer. Open a pull request. We may be slow to answer, but we will look.
 
 ## The next chapter: Starfold
 
@@ -69,4 +69,4 @@ Starbite is done. **Starfold** is next: everything we learned here, built proper
 
 Mixed, file by file. See [LICENSE](LICENSE) and [THIRD-PARTY.md](THIRD-PARTY.md). In short: the SPDX header in each file wins. XNU patches stay APSL-2.0, kernel-side and driver code mostly GPL-2.0-only, and our files without a header are MIT.
 
-Not affiliated with or endorsed by Apple, Samsung, Google, Microsoft, Arm or Broadcom. All names are trademarks of their owners. Built by the Starbite project with Claude.
+Not affiliated with or endorsed by Apple, Samsung, Google, Microsoft, Arm or Broadcom. All names are trademarks of their owners.
