@@ -59,6 +59,8 @@ Removed before publishing, so these parts will not build as is:
 
 ## Contributing
 
+**Wanted most: an installer.** We never finished one, so today every OS has to be set up by hand. If you build a real installer that takes a stock S9 to the full multi-boot setup, that would be amazing, and we would gladly link to it here.
+
 **Contributions are welcome.** The project is finished on our side, but the code is here for anyone who wants to take it further: clean replacements for the known gaps, an actual installer, support for the S9+ (SM-G965F), more drivers, ports to newer OS versions, and a real installer. Open a pull request. We may be slow to answer, but we will look.
 
 ## The next chapter: Starfold
