@@ -41,7 +41,7 @@ Method: inventory from the repo and notes, then a web search for earlier work in
 ## ios-4 [first_on_this_class_of_device] significance 7
 **Claim:** Narrowest honest wording: likely the first iOS/iPadOS CoreAnimation UI composited on an ARM Mali GPU, via Mesa Panfrost OpenGL ES cross-built for iOS ('sbca' in backboardd), 2026-10-29.
 
-**Earlier work found:** GPU-composited iOS on non-Apple hardware came first on Adreno: UniXNU on the Xiaomi Pad 6S Pro by about 10-20, and HakiOS's EAGL/GL bridge on Snapdragon. On Mali, every dated example I found is later: another S9 project S9 Panfrost GLES (seen 11-01), Galaxy A50 (repo 11-06), the S9+ fork (built on another S9 project/HakiOS, 11-06), Galaxy S7 Mali-T880 forks via the HakiOS EAGL bridge (status 'late Oct to mid Nov', but the only exact date is 11-15), S20 Mali-G77 ports, and hakios-a22 (CoreAnimation still in software). The S7 forks' first GPU date could not be pinned down. Gap: an exact earliest S7/T880 date.
+**Earlier work found:** GPU-composited iOS on non-Apple hardware came first on Adreno: UniXNU on the Xiaomi Pad 6S Pro by about 10-20, and another project's EAGL/GL bridge on Snapdragon. On Mali, every dated example I found is later: another S9 project S9 Panfrost GLES (seen 11-01), Galaxy A50 (repo 11-06), the S9+ fork (built on another S9 project/another project, 11-06), Galaxy S7 Mali-T880 forks via the another project EAGL bridge (status 'late Oct to mid Nov', but the only exact date is 11-15), S20 Mali-G77 ports, and hakios-a22 (CoreAnimation still in software). The S7 forks' first GPU date could not be pinned down. Gap: an exact earliest S7/T880 date.
 
 **Skeptic note:** Holds, but only by days, and it rests on internal dates. Wording: 'first known'. The S7 Mali-T880 ports are the one risk I could not date precisely.
 
@@ -86,7 +86,7 @@ Method: inventory from the repo and notes, then a web search for earlier work in
 ## ios-2 [first_on_this_class_of_device] significance 6
 **Claim:** Narrowest honest wording: first ARM Mali GPU jobs/pixels/triangle under XNU (StarbiteMali kext + Mesa Bifrost compiler on the Mali-G72, 2026-10-27).
 
-**Earlier work found:** A non-Apple GPU under XNU came first: UniXNU's native Adreno 740 driver (imported 10-20, user-space GPU test 10-23), and HakiOS's GL bridge on Adreno. Every dated Mali project I found is later: another S9 project S9 'mali=9 THE GPU WROTE IT' on 11-01, viva-gpu Mali-G57 from 11-03, A50 from 11-06, S9+ fork 11-06, S20 Mali-G77 from 11-14, S7 Mali-T880 forks (exact date not found, status 11-15). hakios-a22 Mali-G52 drew with Panfrost but stalled.
+**Earlier work found:** A non-Apple GPU under XNU came first: UniXNU's native Adreno 740 driver (imported 10-20, user-space GPU test 10-23), and another project's GL bridge on Adreno. Every dated Mali project I found is later: another S9 project S9 'mali=9 THE GPU WROTE IT' on 11-01, viva-gpu Mali-G57 from 11-03, A50 from 11-06, S9+ fork 11-06, S20 Mali-G77 from 11-14, S7 Mali-T880 forks (exact date not found, status 11-15). hakios-a22 Mali-G52 drew with Panfrost but stalled.
 
 **Skeptic note:** A lead of about 5 days over another S9 project on the same phone. This is a strong Mali-specific claim, but it rests on internal dates. The undated S7 T880 forks are a residual risk.
 
